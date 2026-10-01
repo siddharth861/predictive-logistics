@@ -1,7 +1,22 @@
 services:
 
+  backend:
+    build:
+      context: ./backend
+    container_name: predictive_logistics_backend
+    restart: unless-stopped
+    ports:
+      - "8001:8000"
+    volumes:
+      - ./backend:/app
+    environment:
+      PYTHONUNBUFFERED: "1"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   postgres:
-    image: postgis/postgis:16-3.4
+    image: postgis/postgis:16-3.5
     container_name: predictive_logistics_postgres
     restart: unless-stopped
     environment:
@@ -9,7 +24,7 @@ services:
       POSTGRES_USER: logistics_user
       POSTGRES_PASSWORD: logistics_dev_password
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -27,21 +42,6 @@ services:
     volumes:
       - redis_data:/data
 
-  minio:
-    image: minio/minio:latest
-    container_name: predictive_logistics_minio
-    restart: unless-stopped
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: logistics_admin
-      MINIO_ROOT_PASSWORD: logistics_dev_password
-    ports:
-      - "9000:9000"
-      - "9001:9001"
-    volumes:
-      - minio_data:/data
-
 volumes:
   postgres_data:
   redis_data:
-  minio_data:
