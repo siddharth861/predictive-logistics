@@ -1,3 +1,4 @@
+from app.models.refresh_token import RefreshToken
 from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 
 from app.models.data_source import (
@@ -23,6 +24,8 @@ from app.models.data_lineage import DataLineage
 from app.models.location import Location
 from app.models.route import Route
 
+from app.models.user import User, UserRole
+
 
 __all__ = [
     "Base",
@@ -39,4 +42,6 @@ __all__ = [
     "DataLineage",
     "Location",
     "Route",
+    "User",
+    "UserRole",
 ]
