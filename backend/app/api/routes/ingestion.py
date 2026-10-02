@@ -1,5 +1,11 @@
 from uuid import UUID
-
+from app.ingestion.mapping_engine import (
+    apply_mapping_to_staging_records,
+)
+from app.ingestion.validator import (
+    validate_records,
+    update_staging_record_status,
+)
 from app.ingestion.schema_detector import (
     detect_schema,
     detect_mapping_conflicts,
@@ -454,4 +460,98 @@ def detect_uploaded_schema(
         "row_count": len(rows),
         "detections": detection_results,
         "conflicts": conflicts,
+    }
+@router.post("/validate")
+def validate_ingestion(
+    ingestion_job_id: UUID,
+    db: Session = Depends(get_db),
+):
+    """
+    Validate all staged records belonging to an ingestion job.
+    """
+
+    staging_records = (
+        db.query(StagingRecord)
+        .filter(
+            StagingRecord.ingestion_job_id
+            == ingestion_job_id
+        )
+        .order_by(
+            StagingRecord.row_number
+        )
+        .all()
+    )
+
+    if not staging_records:
+        raise HTTPException(
+            status_code=404,
+            detail="No staging records found.",
+        )
+
+    mapping_configuration = {
+        "version": "1.0",
+        "mappings": [
+            {
+                "source_column": "item_code",
+                "canonical_field": "ITEM_CODE",
+            },
+            {
+                "source_column": "item_name",
+                "canonical_field": "ITEM_NAME",
+            },
+            {
+                "source_column": "quantity",
+                "canonical_field": "QUANTITY",
+            },
+            {
+                "source_column": "location",
+                "canonical_field": "LOCATION",
+            },
+        ],
+    }
+
+    canonical_records = (
+        apply_mapping_to_staging_records(
+            staging_records,
+            mapping_configuration,
+        )
+    )
+
+    records = [
+        item["data"]
+        for item in canonical_records
+    ]
+
+    validation_results = validate_records(
+        records
+    )
+
+    update_staging_record_status(
+        staging_records,
+        validation_results,
+    )
+
+    db.commit()
+
+    valid_count = sum(
+        1
+        for result in validation_results
+        if result["valid"]
+    )
+
+    invalid_count = (
+        len(validation_results)
+        - valid_count
+    )
+
+    return {
+        "ingestion_job_id": str(
+            ingestion_job_id
+        ),
+        "total_records": len(
+            validation_results
+        ),
+        "valid_records": valid_count,
+        "quarantined_records": invalid_count,
+        "results": validation_results,
     }
