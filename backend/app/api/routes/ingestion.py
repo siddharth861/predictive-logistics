@@ -1,3 +1,10 @@
+from uuid import UUID
+
+from app.ingestion.schema_detector import (
+    detect_schema,
+    detect_mapping_conflicts,
+    mark_unmapped_columns,
+)
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -357,3 +364,94 @@ async def upload_file(
             Path(temporary_file.name).unlink(
                 missing_ok=True
             )
+@router.post("/detect-schema")
+def detect_uploaded_schema(
+    source_id: UUID,
+    db: Session = Depends(get_db),
+):
+    """
+    Detect the schema of the latest ingestion job
+    belonging to a data source.
+    """
+
+    data_source = (
+        db.query(DataSource)
+        .filter(DataSource.id == source_id)
+        .first()
+    )
+
+    if not data_source:
+        raise HTTPException(
+            status_code=404,
+            detail="Data source not found.",
+        )
+
+    ingestion_job = (
+        db.query(IngestionJob)
+        .filter(
+            IngestionJob.source_id == source_id
+        )
+        .order_by(
+            IngestionJob.created_at.desc()
+        )
+        .first()
+    )
+
+    if not ingestion_job:
+        raise HTTPException(
+            status_code=404,
+            detail="No ingestion job found for this source.",
+        )
+
+    staging_records = (
+        db.query(StagingRecord)
+        .filter(
+            StagingRecord.ingestion_job_id
+            == ingestion_job.id
+        )
+        .order_by(
+            StagingRecord.row_number
+        )
+        .all()
+    )
+
+    if not staging_records:
+        raise HTTPException(
+            status_code=400,
+            detail="No staging records available for schema detection.",
+        )
+
+    rows = [
+        record.raw_data
+        for record in staging_records
+    ]
+
+    columns = list(
+        rows[0].keys()
+    )
+
+    detection_results = detect_schema(
+        columns,
+        rows,
+    )
+
+    detection_results = (
+        mark_unmapped_columns(
+            detection_results
+        )
+    )
+
+    conflicts = detect_mapping_conflicts(
+        detection_results
+    )
+
+    return {
+        "source_id": str(source_id),
+        "ingestion_job_id": str(
+            ingestion_job.id
+        ),
+        "columns": columns,
+        "row_count": len(rows),
+        "detections": detection_results,
+        "conflicts": conflicts,
+    }
