@@ -3,7 +3,7 @@ import uuid
 
 from sqlalchemy import Enum, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 
@@ -62,4 +62,9 @@ class ValidationError(
         nullable=False,
         default=ValidationErrorStatus.OPEN,
         index=True,
+    )
+
+    ingestion_job: Mapped["IngestionJob"] = relationship(
+        "IngestionJob",
+        back_populates="validation_errors",
     )

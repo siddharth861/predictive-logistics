@@ -4,7 +4,7 @@ from datetime import datetime
 
 from sqlalchemy import DateTime, Enum, ForeignKey, Integer, Text
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 
@@ -65,4 +65,19 @@ class IngestionJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     error_message: Mapped[str | None] = mapped_column(
         Text,
         nullable=True,
+    )
+
+    source: Mapped["DataSource"] = relationship(
+        "DataSource",
+        back_populates="ingestion_jobs",
+    )
+
+    validation_errors: Mapped[list["ValidationError"]] = relationship(
+        "ValidationError",
+        back_populates="ingestion_job",
+    )
+
+    data_lineage: Mapped[list["DataLineage"]] = relationship(
+        "DataLineage",
+        back_populates="ingestion_job",
     )

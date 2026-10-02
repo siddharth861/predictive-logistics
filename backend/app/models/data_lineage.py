@@ -2,7 +2,7 @@ import uuid
 
 from sqlalchemy import ForeignKey, JSON, String, Text
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 
@@ -46,4 +46,9 @@ class DataLineage(
     notes: Mapped[str | None] = mapped_column(
         Text,
         nullable=True,
+    )
+
+    ingestion_job: Mapped["IngestionJob"] = relationship(
+        "IngestionJob",
+        back_populates="data_lineage",
     )

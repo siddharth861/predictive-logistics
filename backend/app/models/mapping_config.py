@@ -2,7 +2,7 @@ import uuid
 
 from sqlalchemy import Boolean, ForeignKey, Integer, JSON, String
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 
@@ -38,4 +38,9 @@ class MappingConfig(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         nullable=False,
         default=True,
         index=True,
+    )
+
+    source: Mapped["DataSource"] = relationship(
+        "DataSource",
+        back_populates="mapping_configs",
     )

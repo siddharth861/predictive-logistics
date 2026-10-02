@@ -1,9 +1,8 @@
 import enum
-import uuid
 from datetime import datetime
 
 from sqlalchemy import DateTime, Enum, String, Text
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 
@@ -49,4 +48,14 @@ class DataSource(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     last_sync_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
+    )
+
+    ingestion_jobs: Mapped[list["IngestionJob"]] = relationship(
+        "IngestionJob",
+        back_populates="source",
+    )
+
+    mapping_configs: Mapped[list["MappingConfig"]] = relationship(
+        "MappingConfig",
+        back_populates="source",
     )
