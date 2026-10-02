@@ -1,16 +1,24 @@
 from uuid import UUID
+from app.models.mapping_config import MappingConfig
 from app.ingestion.mapping_engine import (
     apply_mapping_to_staging_records,
+    save_mapping_configuration,
+)
+from app.ingestion.mapping_engine import (
+    apply_mapping_to_staging_records,
+    save_mapping_configuration,
 )
 from app.ingestion.validator import (
     validate_records,
     update_staging_record_status,
 )
+
 from app.ingestion.schema_detector import (
     detect_schema,
     detect_mapping_conflicts,
     mark_unmapped_columns,
 )
+
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -18,20 +26,24 @@ from uuid import uuid4
 
 import fitz
 import pandas as pd
+
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy.orm import Session
 
 from app.db.dependencies import get_db
+
 from app.models.data_source import (
     DataSource,
     DataSourceCategory,
     DataSourceStatus,
     DataSourceType,
 )
+
 from app.models.ingestion_job import (
     IngestionJob,
     IngestionJobStatus,
 )
+
 from app.models.staging_record import (
     StagingRecord,
     StagingRecordStatus,
@@ -370,6 +382,8 @@ async def upload_file(
             Path(temporary_file.name).unlink(
                 missing_ok=True
             )
+
+
 @router.post("/detect-schema")
 def detect_uploaded_schema(
     source_id: UUID,
@@ -461,6 +475,130 @@ def detect_uploaded_schema(
         "detections": detection_results,
         "conflicts": conflicts,
     }
+@router.post("/save-mapping")
+def save_detected_mapping(
+    source_id: UUID,
+    name: str = "Auto-detected mapping",
+    db: Session = Depends(get_db),
+):
+    """
+    Detect the latest source schema and persist the resulting
+    mapping configuration.
+    """
+
+    data_source = (
+        db.query(DataSource)
+        .filter(DataSource.id == source_id)
+        .first()
+    )
+
+    if not data_source:
+        raise HTTPException(
+            status_code=404,
+            detail="Data source not found.",
+        )
+
+    ingestion_job = (
+        db.query(IngestionJob)
+        .filter(
+            IngestionJob.source_id == source_id
+        )
+        .order_by(
+            IngestionJob.created_at.desc()
+        )
+        .first()
+    )
+
+    if not ingestion_job:
+        raise HTTPException(
+            status_code=404,
+            detail="No ingestion job found for this source.",
+        )
+
+    staging_records = (
+        db.query(StagingRecord)
+        .filter(
+            StagingRecord.ingestion_job_id
+            == ingestion_job.id
+        )
+        .order_by(
+            StagingRecord.row_number
+        )
+        .all()
+    )
+
+    if not staging_records:
+        raise HTTPException(
+            status_code=400,
+            detail="No staging records available for mapping.",
+        )
+
+    rows = [
+        record.raw_data
+        for record in staging_records
+    ]
+
+    columns = list(rows[0].keys())
+
+    detection_results = detect_schema(
+        columns,
+        rows,
+    )
+
+    detection_results = mark_unmapped_columns(
+        detection_results
+    )
+
+    conflicts = detect_mapping_conflicts(
+        detection_results
+    )
+
+    if conflicts:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Mapping conflicts detected. Resolve them before saving.",
+                "conflicts": conflicts,
+            },
+        )
+
+    from app.ingestion.mapping_engine import (
+        build_mapping_configuration,
+    )
+
+    mapping_configuration = build_mapping_configuration(
+        detection_results
+    )
+
+    try:
+        mapping_config = save_mapping_configuration(
+            db=db,
+            source_id=source_id,
+            name=name,
+            mapping_configuration=mapping_configuration,
+        )
+
+        db.commit()
+
+    except ValueError as exc:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
+
+    return {
+        "message": "Mapping configuration saved successfully.",
+        "mapping_config_id": str(mapping_config.id),
+        "source_id": str(source_id),
+        "ingestion_job_id": str(ingestion_job.id),
+        "name": mapping_config.name,
+        "version": mapping_config.version,
+        "is_active": mapping_config.is_active,
+        "mapping_definition": mapping_config.mapping_definition,
+    }
+
 @router.post("/validate")
 def validate_ingestion(
     ingestion_job_id: UUID,
@@ -488,27 +626,29 @@ def validate_ingestion(
             detail="No staging records found.",
         )
 
-    mapping_configuration = {
-        "version": "1.0",
-        "mappings": [
-            {
-                "source_column": "item_code",
-                "canonical_field": "ITEM_CODE",
-            },
-            {
-                "source_column": "item_name",
-                "canonical_field": "ITEM_NAME",
-            },
-            {
-                "source_column": "quantity",
-                "canonical_field": "QUANTITY",
-            },
-            {
-                "source_column": "location",
-                "canonical_field": "LOCATION",
-            },
-        ],
-    }
+    mapping_config = (
+    db.query(MappingConfig)
+    .filter(
+        MappingConfig.source_id == (
+            db.query(IngestionJob.source_id)
+            .filter(IngestionJob.id == ingestion_job_id)
+            .scalar_subquery()
+        ),
+        MappingConfig.is_active.is_(True),
+    )
+    .order_by(
+        MappingConfig.version.desc()
+    )
+    .first()
+    )
+
+    if not mapping_config:
+        raise HTTPException(
+            status_code=400,
+            detail="No active mapping configuration found for this ingestion source.",
+        )
+
+    mapping_configuration = mapping_config.mapping_definition
 
     canonical_records = (
         apply_mapping_to_staging_records(
