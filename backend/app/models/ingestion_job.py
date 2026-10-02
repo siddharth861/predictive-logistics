@@ -17,18 +17,28 @@ class IngestionJobStatus(str, enum.Enum):
     FAILED = "FAILED"
 
 
-class IngestionJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+class IngestionJob(
+    UUIDPrimaryKeyMixin,
+    TimestampMixin,
+    Base,
+):
     __tablename__ = "ingestion_jobs"
 
     source_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("data_sources.id", ondelete="RESTRICT"),
+        ForeignKey(
+            "data_sources.id",
+            ondelete="RESTRICT",
+        ),
         nullable=False,
         index=True,
     )
 
     status: Mapped[IngestionJobStatus] = mapped_column(
-        Enum(IngestionJobStatus, name="ingestion_job_status"),
+        Enum(
+            IngestionJobStatus,
+            name="ingestion_job_status",
+        ),
         nullable=False,
         default=IngestionJobStatus.PENDING,
         index=True,
@@ -70,6 +80,12 @@ class IngestionJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     source: Mapped["DataSource"] = relationship(
         "DataSource",
         back_populates="ingestion_jobs",
+    )
+
+    staging_records: Mapped[list["StagingRecord"]] = relationship(
+        "StagingRecord",
+        back_populates="ingestion_job",
+        cascade="all, delete-orphan",
     )
 
     validation_errors: Mapped[list["ValidationError"]] = relationship(

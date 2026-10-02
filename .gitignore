@@ -58,3 +58,5 @@ coverage/
 # Uploaded/generated local files
 uploads/
 generated/
+backend/storage/raw/
+test_inventory.csv

@@ -3,6 +3,7 @@ from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 
 from app.models.data_source import (
     DataSource,
+    DataSourceCategory,
     DataSourceStatus,
     DataSourceType,
 )
@@ -13,6 +14,11 @@ from app.models.ingestion_job import (
 )
 
 from app.models.mapping_config import MappingConfig
+
+from app.models.staging_record import (
+    StagingRecord,
+    StagingRecordStatus,
+)
 
 from app.models.validation_error import (
     ValidationError,
@@ -32,11 +38,14 @@ __all__ = [
     "TimestampMixin",
     "UUIDPrimaryKeyMixin",
     "DataSource",
+    "DataSourceCategory",
     "DataSourceStatus",
     "DataSourceType",
     "IngestionJob",
     "IngestionJobStatus",
     "MappingConfig",
+    "StagingRecord",
+    "StagingRecordStatus",
     "ValidationError",
     "ValidationErrorStatus",
     "DataLineage",
@@ -44,4 +53,5 @@ __all__ = [
     "Route",
     "User",
     "UserRole",
+    "RefreshToken",
 ]
