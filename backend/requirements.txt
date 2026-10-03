@@ -12,3 +12,6 @@ python-multipart
 pandas
 PyMuPDF
 openpyxl
+numpy
+scikit-learn
+joblib

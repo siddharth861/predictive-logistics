@@ -60,3 +60,4 @@ uploads/
 generated/
 backend/storage/raw/
 test_inventory.csv
+backend/storage/models/*.joblib

@@ -6,6 +6,7 @@ from app.api.routes.management import router as management_router
 from app.api.routes.mapping_assistant import router as mapping_assistant_router
 from app.api.routes.quality import router as quality_router
 from app.api.routes.logistics import router as logistics_router
+from app.api.routes.ai import router as ai_router
 
 
 app = FastAPI(
@@ -20,6 +21,7 @@ app.include_router(management_router)
 app.include_router(mapping_assistant_router)
 app.include_router(quality_router)
 app.include_router(logistics_router)
+app.include_router(ai_router)
 
 
 @app.get("/")

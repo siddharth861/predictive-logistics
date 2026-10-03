@@ -5,6 +5,7 @@ from app.models.refresh_token import RefreshToken
 
 from app.models.data_source import DataSource
 from app.models.ingestion_job import IngestionJob
+from app.models.staging_record import StagingRecord
 from app.models.mapping_config import MappingConfig
 from app.models.validation_error import ValidationError
 from app.models.data_lineage import DataLineage
@@ -34,6 +35,7 @@ __all__ = [
     "RefreshToken",
     "DataSource",
     "IngestionJob",
+    "StagingRecord",
     "MappingConfig",
     "ValidationError",
     "DataLineage",
