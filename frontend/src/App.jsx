@@ -3,454 +3,513 @@ import { getBackendHealth } from "./services/api";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8001";
 
-const CANONICAL_FIELDS = [
-  "ITEM_CODE",
-  "ITEM_NAME",
-  "QUANTITY",
-  "LOCATION",
-  "DATE",
-  "CONSUMPTION",
-  "VEHICLE_ID",
-  "SHIPMENT_ID",
-  "ROUTE_ID",
-  "DEMAND",
+const NAV_ITEMS = [
+  { id: "overview", label: "Command Centre", icon: "⌂" },
+  { id: "operations", label: "Operations", icon: "◈" },
+  { id: "map", label: "Operational Map", icon: "◎" },
+  { id: "ai", label: "AI Intelligence", icon: "✦" },
+  { id: "optimization", label: "Optimization", icon: "⇄" },
+  { id: "data", label: "Data Hub", icon: "▦" },
 ];
 
 function App() {
-  const [backendStatus, setBackendStatus] = useState("Checking backend...");
-  const [error, setError] = useState("");
-
-  const [sourceId, setSourceId] = useState("");
-  const [sources, setSources] = useState([]);
-
-  const [assistantData, setAssistantData] = useState(null);
-  const [mappings, setMappings] = useState({});
-  const [loading, setLoading] = useState(false);
-  const [confirming, setConfirming] = useState(false);
-  const [message, setMessage] = useState("");
+  const [activeView, setActiveView] = useState("overview");
+  const [backendStatus, setBackendStatus] = useState("Checking");
+  const [sidebarOpen, setSidebarOpen] = useState(false);
 
   useEffect(() => {
     checkBackend();
-    loadSources();
   }, []);
 
   async function checkBackend() {
     try {
       const data = await getBackendHealth();
 
-      if (data.status === "ok") {
-        setBackendStatus("Connected");
+      if (data.status === "healthy" || data.status === "ok") {
+        setBackendStatus("Operational");
       } else {
-        setBackendStatus("Unexpected response");
+        setBackendStatus("Unexpected");
       }
-    } catch (err) {
-      setBackendStatus("Unavailable");
-      setError(err.message);
+    } catch {
+      setBackendStatus("Offline");
     }
   }
 
-  async function loadSources() {
-    try {
-      const response = await fetch(`${API_URL}/api/management/sources`);
-
-      if (!response.ok) {
-        throw new Error("Could not load data sources.");
-      }
-
-      const data = await response.json();
-
-      /*
-       * Remove duplicate source IDs before displaying them.
-       */
-      const uniqueSources = Array.from(
-        new Map(
-          (data.sources || []).map((source) => [source.id, source])
-        ).values()
-      );
-
-      setSources(uniqueSources);
-    } catch (err) {
-      setError(err.message);
-    }
+  function handleNavigation(view) {
+    setActiveView(view);
+    setSidebarOpen(false);
   }
 
-  async function analyzeSource() {
-    if (!sourceId) {
-      setError("Please select a data source first.");
-      return;
-    }
-
-    setLoading(true);
-    setError("");
-    setMessage("");
-    setAssistantData(null);
-    setMappings({});
-
-    try {
-      const response = await fetch(
-        `${API_URL}/api/ingestion/assistant?source_id=${sourceId}`,
-        {
-          method: "POST",
-        }
-      );
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.detail || "Data Assistant failed.");
-      }
-
-      setAssistantData(data);
-
-      /*
-       * Build the editable mapping from the assistant's
-       * actual detected field.
-       */
-      const initialMappings = {};
-
-      (data.suggestions || []).forEach((item) => {
-        const sourceColumn =
-          item.source_column ||
-          item.source_field ||
-          item.column ||
-          item.field;
-
-        const suggestedField =
-          item.suggested_field ||
-          item.canonical_field ||
-          item.suggested_canonical_field ||
-          "";
-
-        if (sourceColumn) {
-          initialMappings[sourceColumn] = suggestedField;
-        }
-      });
-
-      setMappings(initialMappings);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  function updateMapping(sourceColumn, value) {
-    setMappings((previous) => ({
-      ...previous,
-      [sourceColumn]: value,
-    }));
-  }
-
-  async function confirmMapping() {
-    if (!assistantData) {
-      return;
-    }
-
-    setConfirming(true);
-    setError("");
-    setMessage("");
-
-    try {
-      const response = await fetch(
-        `${API_URL}/api/ingestion/confirm-mapping`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            source_id: assistantData.source_id,
-            overrides: mappings,
-            name: "Data Assistant confirmed mapping",
-          }),
-        }
-      );
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.detail || "Mapping confirmation failed.");
-      }
-
-      setMessage(
-        `Mapping confirmed successfully. Version ${data.version} is now active.`
-      );
-
-      setAssistantData((previous) => ({
-        ...previous,
-        mapping_config_id: data.mapping_config_id,
-        version: data.version,
-      }));
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setConfirming(false);
-    }
-  }
-
-  const summary = assistantData?.summary;
+  const activeItem =
+    NAV_ITEMS.find((item) => item.id === activeView) || NAV_ITEMS[0];
 
   return (
-    <main className="app-shell">
-      <header className="topbar">
-        <div>
-          <div className="eyebrow">PREDICTIVE LOGISTICS</div>
+    <div className="command-shell">
+      {sidebarOpen && (
+        <button
+          className="mobile-overlay"
+          onClick={() => setSidebarOpen(false)}
+          aria-label="Close navigation"
+        />
+      )}
 
-          <h1>Data Assistant</h1>
+      <aside className={`sidebar ${sidebarOpen ? "sidebar-open" : ""}`}>
+        <div className="brand">
+          <div className="brand-mark">
+            <span className="brand-mark-inner">PL</span>
+          </div>
+
+          <div>
+            <div className="brand-name">PREDICTIVE</div>
+            <div className="brand-subtitle">LOGISTICS COMMAND</div>
+          </div>
+        </div>
+
+        <div className="sidebar-divider" />
+
+        <div className="nav-label">COMMAND MODULES</div>
+
+        <nav className="navigation">
+          {NAV_ITEMS.map((item) => (
+            <button
+              key={item.id}
+              className={`nav-item ${
+                activeView === item.id ? "active" : ""
+              }`}
+              onClick={() => handleNavigation(item.id)}
+            >
+              <span className="nav-icon">{item.icon}</span>
+              <span>{item.label}</span>
+
+              {activeView === item.id && <span className="active-indicator" />}
+            </button>
+          ))}
+        </nav>
+
+        <div className="sidebar-spacer" />
+
+        <div className="system-card">
+          <div className="system-card-header">
+            <span className="system-pulse" />
+            SYSTEM STATUS
+          </div>
+
+          <strong>{backendStatus}</strong>
 
           <p>
-            Connect logistics data and let the system understand its structure.
+            Core logistics services are being monitored through the command
+            centre.
           </p>
         </div>
 
-        <div
-          className={`connection-status ${
-            backendStatus === "Connected" ? "online" : "offline"
-          }`}
-        >
-          <span className="status-dot"></span>
-          {backendStatus}
+        <div className="sidebar-footer">
+          <span>PLATFORM</span>
+          <strong>v0.1 • SIH 2026</strong>
         </div>
-      </header>
+      </aside>
 
-      <section className="assistant-card">
-        <div className="section-heading">
-          <div>
-            <span className="section-number">01</span>
+      <main className="main-area">
+        <header className="command-header">
+          <div className="header-left">
+            <button
+              className="mobile-menu"
+              onClick={() => setSidebarOpen(true)}
+              aria-label="Open navigation"
+            >
+              ☰
+            </button>
 
             <div>
-              <h2>Select Data Source</h2>
+              <div className="breadcrumb">
+                COMMAND CENTRE <span>/</span> {activeItem.label.toUpperCase()}
+              </div>
 
-              <p>
-                Choose an uploaded source that the Data Assistant should
-                analyze.
-              </p>
+              <h1>{activeItem.label}</h1>
+            </div>
+          </div>
+
+          <div className="header-right">
+            <div className="header-clock">
+              <span className="clock-dot" />
+              LIVE OPERATIONAL VIEW
+            </div>
+
+            <div className="header-user">
+              <div className="user-avatar">LO</div>
+              <div className="user-info">
+                <strong>Logistics Officer</strong>
+                <span>Command Access</span>
+              </div>
+            </div>
+          </div>
+        </header>
+
+        {activeView === "overview" && (
+          <CommandOverview backendStatus={backendStatus} />
+        )}
+
+        {activeView !== "overview" && (
+          <ModulePlaceholder
+            title={activeItem.label}
+            description={getModuleDescription(activeView)}
+            icon={activeItem.icon}
+          />
+        )}
+      </main>
+    </div>
+  );
+}
+
+function CommandOverview({ backendStatus }) {
+  return (
+    <div className="dashboard">
+      <section className="hero-strip">
+        <div>
+          <div className="eyebrow">
+            LOGISTICS OPERATIONS • SYNTHETIC DEMONSTRATION DATA
+          </div>
+
+          <h2>Operational Picture</h2>
+
+          <p>
+            A unified view of supply readiness, movement, demand and
+            decision-support intelligence.
+          </p>
+        </div>
+
+        <div className="hero-status">
+          <div className="hero-status-label">SYSTEM</div>
+          <strong>{backendStatus}</strong>
+          <span>All command services</span>
+        </div>
+      </section>
+
+      <section className="kpi-grid">
+        <KpiCard
+          label="SUPPLY READINESS"
+          value="92%"
+          detail="Across monitored locations"
+          status="stable"
+        />
+
+        <KpiCard
+          label="ACTIVE SHIPMENTS"
+          value="31"
+          detail="Currently tracked"
+          status="stable"
+        />
+
+        <KpiCard
+          label="LOW STOCK EVENTS"
+          value="01"
+          detail="Requires attention"
+          status="warning"
+        />
+
+        <KpiCard
+          label="AI FORECAST"
+          value="39.4"
+          unit="L"
+          detail="Next-day fuel demand"
+          status="ai"
+        />
+      </section>
+
+      <section className="workspace-grid">
+        <div className="panel map-panel">
+          <PanelHeader
+            eyebrow="01 • SITUATIONAL AWARENESS"
+            title="Operational Map"
+            action="OPEN MAP"
+          />
+
+          <div className="map-placeholder">
+            <div className="map-grid" />
+
+            <div className="map-coordinate top-left">19°04'33"N</div>
+            <div className="map-coordinate top-right">72°52'39"E</div>
+
+            <div className="map-route route-one" />
+            <div className="map-route route-two" />
+
+            <MapNode
+              className="node-depot"
+              label="DEPOT-A"
+              type="DEPOT"
+            />
+
+            <MapNode
+              className="node-forward"
+              label="FORWARD-B"
+              type="FORWARD"
+            />
+
+            <div className="map-center-label">
+              <span>OPERATIONAL AREA</span>
+              <strong>LIVE LOGISTICS NETWORK</strong>
+            </div>
+
+            <div className="map-legend">
+              <div>
+                <span className="legend-dot depot" />
+                Depot
+              </div>
+
+              <div>
+                <span className="legend-dot forward" />
+                Forward Location
+              </div>
+
+              <div>
+                <span className="legend-line" />
+                Supply Route
+              </div>
             </div>
           </div>
         </div>
 
-        <div className="source-row">
-          <select
-            value={sourceId}
-            onChange={(event) => {
-              setSourceId(event.target.value);
-              setAssistantData(null);
-              setMappings({});
-              setMessage("");
-              setError("");
-            }}
-          >
-            <option value="">Select a data source...</option>
+        <div className="right-stack">
+          <div className="panel intelligence-panel">
+            <PanelHeader
+              eyebrow="02 • DECISION INTELLIGENCE"
+              title="AI Logistics Brief"
+              action="VIEW"
+            />
 
-            {sources.map((source) => (
-              <option key={source.id} value={source.id}>
-                {source.name} — {source.data_category || "CUSTOM"}
-              </option>
-            ))}
-          </select>
+            <div className="ai-summary">
+              <div className="ai-symbol">✦</div>
 
-          <button
-            className="primary-button"
-            onClick={analyzeSource}
-            disabled={loading || !sourceId}
-          >
-            {loading ? "Analyzing..." : "Analyze Data"}
-          </button>
+              <div>
+                <strong>Fuel demand is expected to remain stable.</strong>
+
+                <p>
+                  Forecast indicates approximately 39.4 L/day for the next
+                  planning period.
+                </p>
+              </div>
+            </div>
+
+            <div className="ai-metrics">
+              <div>
+                <span>CONFIDENCE</span>
+                <strong>90.95%</strong>
+              </div>
+
+              <div>
+                <span>RISK</span>
+                <strong className="low-risk">LOW</strong>
+              </div>
+
+              <div>
+                <span>COVER</span>
+                <strong>12.7d</strong>
+              </div>
+            </div>
+          </div>
+
+          <div className="panel alerts-panel">
+            <PanelHeader
+              eyebrow="03 • ATTENTION"
+              title="Operational Alerts"
+              action="ALL"
+            />
+
+            <AlertRow
+              severity="warning"
+              title="Low stock threshold"
+              description="DEPOT-A • Fuel inventory requires monitoring"
+              time="ACTIVE"
+            />
+
+            <AlertRow
+              severity="info"
+              title="Route monitoring"
+              description="31 shipment records available for analysis"
+              time="LIVE"
+            />
+
+            <AlertRow
+              severity="success"
+              title="System healthy"
+              description="Core backend services responding normally"
+              time="NOW"
+            />
+          </div>
         </div>
       </section>
 
-      {error && (
-        <div className="alert error">
-          <strong>Error</strong>
-          <span>{error}</span>
+      <section className="bottom-grid">
+        <div className="panel supply-panel">
+          <PanelHeader
+            eyebrow="04 • SUPPLY NETWORK"
+            title="Supply Flow"
+            action="EXPLORE"
+          />
+
+          <div className="supply-flow">
+            <div className="flow-location">
+              <span className="flow-node depot-node" />
+
+              <div>
+                <strong>DEPOT-A</strong>
+                <span>Primary Supply Node</span>
+              </div>
+            </div>
+
+            <div className="flow-connector">
+              <span>18.97 km</span>
+
+              <div className="connector-line">
+                <i />
+                <i />
+                <i />
+              </div>
+            </div>
+
+            <div className="flow-location">
+              <span className="flow-node forward-node" />
+
+              <div>
+                <strong>FORWARD-B</strong>
+                <span>Destination Node</span>
+              </div>
+            </div>
+          </div>
         </div>
-      )}
 
-      {message && (
-        <div className="alert success">
-          <strong>Success</strong>
-          <span>{message}</span>
+        <div className="panel optimization-panel">
+          <PanelHeader
+            eyebrow="05 • PLANNING"
+            title="Optimization"
+            action="OPEN"
+          />
+
+          <div className="optimization-result">
+            <div>
+              <span>RECOMMENDED RESUPPLY</span>
+
+              <strong>
+                54.6 <small>L</small>
+              </strong>
+            </div>
+
+            <div className="optimization-status">
+              <span className="status-check">✓</span>
+
+              <div>
+                <strong>FEASIBLE</strong>
+                <span>Vehicle and route constraints satisfied</span>
+              </div>
+            </div>
+          </div>
         </div>
-      )}
+      </section>
 
-      {assistantData && (
-        <>
-          <section className="assistant-card">
-            <div className="section-heading">
-              <div>
-                <span className="section-number">02</span>
-
-                <div>
-                  <h2>Data Understanding</h2>
-
-                  <p>
-                    The assistant inspected the source and generated mapping
-                    suggestions.
-                  </p>
-                </div>
-              </div>
-            </div>
-
-            <div className="stats-grid">
-              <div className="stat-card">
-                <span>Columns</span>
-                <strong>{summary?.total_columns || 0}</strong>
-              </div>
-
-              <div className="stat-card">
-                <span>Auto Mapped</span>
-                <strong>{summary?.auto_mapped || 0}</strong>
-              </div>
-
-              <div className="stat-card">
-                <span>Suggestions</span>
-                <strong>{summary?.suggestions || 0}</strong>
-              </div>
-
-              <div className="stat-card">
-                <span>Needs Review</span>
-                <strong>{summary?.needs_review || 0}</strong>
-              </div>
-
-              <div className="stat-card">
-                <span>Conflicts</span>
-                <strong>{summary?.conflicts || 0}</strong>
-              </div>
-            </div>
-          </section>
-
-          <section className="assistant-card">
-            <div className="section-heading">
-              <div>
-                <span className="section-number">03</span>
-
-                <div>
-                  <h2>Review Mapping</h2>
-
-                  <p>
-                    Review the assistant's decisions before saving the mapping.
-                  </p>
-                </div>
-              </div>
-            </div>
-
-            <div className="mapping-table">
-              <div className="mapping-header">
-                <span>Source Field</span>
-                <span>AI Decision</span>
-                <span>Confidence</span>
-                <span>Canonical Field</span>
-              </div>
-
-              {(assistantData.suggestions || []).map((item, index) => {
-                const sourceColumn =
-                  item.source_column ||
-                  item.source_field ||
-                  item.column ||
-                  item.field ||
-                  `Field ${index + 1}`;
-
-                const confidence = Math.round(
-                  (item.confidence || 0) * 100
-                );
-
-                return (
-                  <div className="mapping-row" key={sourceColumn}>
-                    <div>
-                      <strong>{sourceColumn}</strong>
-                    </div>
-
-                    <div>
-                      <span
-                        className={`decision ${
-                          item.decision === "AUTO"
-                            ? "auto"
-                            : item.decision === "SUGGEST"
-                            ? "suggest"
-                            : "review"
-                        }`}
-                      >
-                        {item.decision || "REVIEW"}
-                      </span>
-                    </div>
-
-                    <div>
-                      <div className="confidence-wrapper">
-                        <div className="confidence-bar">
-                          <div
-                            className="confidence-fill"
-                            style={{
-                              width: `${confidence}%`,
-                            }}
-                          ></div>
-                        </div>
-
-                        <span>{confidence}%</span>
-                      </div>
-                    </div>
-
-                    <div>
-                      <select
-                        value={mappings[sourceColumn] || ""}
-                        onChange={(event) =>
-                          updateMapping(
-                            sourceColumn,
-                            event.target.value
-                          )
-                        }
-                      >
-                        <option value="">Do not map</option>
-
-                        {CANONICAL_FIELDS.map((field) => (
-                          <option key={field} value={field}>
-                            {field}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-
-            <div className="confirmation-area">
-              <div>
-                <strong>Ready to save?</strong>
-
-                <p>
-                  The confirmed mapping will become the active version for
-                  this source.
-                </p>
-              </div>
-
-              <button
-                className="primary-button"
-                onClick={confirmMapping}
-                disabled={confirming}
-              >
-                {confirming ? "Saving..." : "Confirm Mapping"}
-              </button>
-            </div>
-          </section>
-
-          {assistantData.version && (
-            <section className="version-card">
-              <div className="version-icon">✓</div>
-
-              <div>
-                <strong>Active Mapping Version</strong>
-
-                <p>
-                  Version {assistantData.version} is active for this data
-                  source.
-                </p>
-              </div>
-            </section>
-          )}
-        </>
-      )}
-    </main>
+      <footer className="dashboard-footer">
+        <span>Predictive Logistics Command Centre</span>
+        <span>Prototype • Synthetic / Non-sensitive Data</span>
+      </footer>
+    </div>
   );
+}
+
+function KpiCard({ label, value, unit, detail, status }) {
+  return (
+    <div className={`kpi-card ${status}`}>
+      <div className="kpi-top">
+        <span>{label}</span>
+        <i />
+      </div>
+
+      <div className="kpi-value">
+        {value}
+        {unit && <small>{unit}</small>}
+      </div>
+
+      <div className="kpi-detail">{detail}</div>
+    </div>
+  );
+}
+
+function PanelHeader({ eyebrow, title, action }) {
+  return (
+    <div className="panel-header">
+      <div>
+        <span>{eyebrow}</span>
+        <h3>{title}</h3>
+      </div>
+
+      <button>{action} ↗</button>
+    </div>
+  );
+}
+
+function MapNode({ className, label, type }) {
+  return (
+    <div className={`map-node ${className}`}>
+      <div className="map-node-marker">
+        <span />
+      </div>
+
+      <div className="map-node-label">
+        <strong>{label}</strong>
+        <span>{type}</span>
+      </div>
+    </div>
+  );
+}
+
+function AlertRow({ severity, title, description, time }) {
+  return (
+    <div className="alert-row">
+      <span className={`alert-marker ${severity}`} />
+
+      <div className="alert-content">
+        <strong>{title}</strong>
+        <span>{description}</span>
+      </div>
+
+      <small>{time}</small>
+    </div>
+  );
+}
+
+function ModulePlaceholder({ title, description, icon }) {
+  return (
+    <div className="module-page">
+      <div className="module-placeholder">
+        <div className="module-icon">{icon}</div>
+
+        <div className="eyebrow">COMMAND MODULE</div>
+
+        <h2>{title}</h2>
+
+        <p>{description}</p>
+
+        <div className="module-progress">
+          <span>MODULE FOUNDATION</span>
+          <strong>READY FOR INTEGRATION</strong>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function getModuleDescription(view) {
+  const descriptions = {
+    operations:
+      "Monitor inventory, shipments, vehicles and logistics events from one operational workspace.",
+    map:
+      "Explore locations, routes, movement and geographic logistics intelligence.",
+    ai:
+      "Review demand forecasts, risk signals, anomalies and explainable AI insights.",
+    optimization:
+      "Generate feasible supply plans and compare operational what-if scenarios.",
+    data:
+      "Manage connected sources, ingestion health, data quality, mappings and lineage.",
+  };
+
+  return descriptions[view] || "Command module ready for integration.";
 }
 
 export default App;

@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes.ai import router as ai_router
 from app.api.routes.auth import router as auth_router
@@ -21,6 +22,26 @@ app = FastAPI(
 )
 
 
+# ============================================================================
+# CORS
+# ============================================================================
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ============================================================================
+# API ROUTERS
+# ============================================================================
+
 app.include_router(auth_router)
 app.include_router(ingestion_router)
 app.include_router(mapping_assistant_router)
@@ -32,6 +53,10 @@ app.include_router(gis_router)
 app.include_router(optimization_router)
 
 
+# ============================================================================
+# ROOT
+# ============================================================================
+
 @app.get("/")
 def root():
     return {
@@ -39,6 +64,10 @@ def root():
         "status": "running",
     }
 
+
+# ============================================================================
+# HEALTH
+# ============================================================================
 
 @app.get("/health")
 def health_check():

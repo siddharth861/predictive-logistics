@@ -1,7 +1,7 @@
-const API_URL = import.meta.env.VITE_API_URL;
+const API_URL = "http://localhost:8001";
 
 export async function getBackendHealth() {
-  const response = await fetch(`${API_URL}/api/health`);
+  const response = await fetch(`${API_URL}/health`);
 
   if (!response.ok) {
     throw new Error(`Backend request failed: ${response.status}`);
