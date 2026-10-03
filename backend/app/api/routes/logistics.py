@@ -16,6 +16,8 @@ from app.models import (
     Location,
     Shipment,
     Vehicle,
+    Supplier,
+    MaintenanceRecord,
 )
 
 router = APIRouter(prefix="/api/logistics", tags=["Logistics"])
@@ -117,6 +119,37 @@ class ShipmentCreate(BaseModel):
 
 
 class ShipmentStatusUpdate(BaseModel):
+    status: str
+
+
+# ============================================================
+# SUPPLIER SCHEMAS
+# ============================================================
+
+class SupplierCreate(BaseModel):
+    supplier_code: str = Field(min_length=1, max_length=100)
+    name: str = Field(min_length=1, max_length=255)
+    supplier_type: Optional[str] = None
+    contact_details: Optional[str] = None
+    location_id: Optional[str] = None
+    status: str = "ACTIVE"
+
+
+# ============================================================
+# MAINTENANCE SCHEMAS
+# ============================================================
+
+class MaintenanceCreate(BaseModel):
+    vehicle_id: str
+    maintenance_type: str = Field(min_length=1, max_length=100)
+    status: str = "SCHEDULED"
+    scheduled_date: Optional[date] = None
+    completed_date: Optional[date] = None
+    description: Optional[str] = None
+    cost: Optional[float] = Field(default=None, ge=0)
+
+
+class MaintenanceStatusUpdate(BaseModel):
     status: str
 
 
@@ -1038,3 +1071,66 @@ def update_shipment_status(
         "actual_arrival": shipment.actual_arrival,
         "updated_at": shipment.updated_at,
     }
+
+# ============================================================
+# SUPPLIERS
+# ============================================================
+
+@router.post("/suppliers")
+def create_supplier(payload: SupplierCreate, db: Session = Depends(get_db)):
+    existing = db.scalar(select(Supplier).where(Supplier.supplier_code == payload.supplier_code))
+    if existing:
+        raise HTTPException(status_code=409, detail="Supplier code already exists")
+    allowed_statuses = {"ACTIVE", "INACTIVE", "SUSPENDED"}
+    if payload.status not in allowed_statuses:
+        raise HTTPException(status_code=400, detail=f"Invalid supplier status. Allowed values: {sorted(allowed_statuses)}")
+    supplier = Supplier(supplier_code=payload.supplier_code, name=payload.name, supplier_type=payload.supplier_type, contact_details=payload.contact_details, location_id=payload.location_id, status=payload.status)
+    db.add(supplier); db.commit(); db.refresh(supplier)
+    return {"id": str(supplier.id), "supplier_code": supplier.supplier_code, "name": supplier.name, "supplier_type": supplier.supplier_type, "contact_details": supplier.contact_details, "location_id": str(supplier.location_id) if supplier.location_id else None, "status": supplier.status, "is_active": supplier.is_active, "created_at": supplier.created_at}
+
+@router.get("/suppliers")
+def list_suppliers(status: Optional[str] = Query(default=None), db: Session = Depends(get_db)):
+    query = select(Supplier)
+    if status: query = query.where(Supplier.status == status)
+    suppliers = db.scalars(query.order_by(Supplier.supplier_code)).all()
+    return {"count": len(suppliers), "suppliers": [{"id": str(s.id), "supplier_code": s.supplier_code, "name": s.name, "supplier_type": s.supplier_type, "contact_details": s.contact_details, "location_id": str(s.location_id) if s.location_id else None, "status": s.status, "is_active": s.is_active, "created_at": s.created_at} for s in suppliers]}
+
+# ============================================================
+# MAINTENANCE
+# ============================================================
+
+@router.post("/maintenance")
+def create_maintenance(payload: MaintenanceCreate, db: Session = Depends(get_db)):
+    vehicle = db.get(Vehicle, payload.vehicle_id)
+    if not vehicle:
+        raise HTTPException(status_code=404, detail="Vehicle not found")
+    allowed_statuses = {"SCHEDULED", "IN_PROGRESS", "COMPLETED", "CANCELLED"}
+    if payload.status not in allowed_statuses:
+        raise HTTPException(status_code=400, detail=f"Invalid maintenance status. Allowed values: {sorted(allowed_statuses)}")
+    if payload.completed_date and payload.scheduled_date and payload.completed_date < payload.scheduled_date:
+        raise HTTPException(status_code=400, detail="completed_date cannot be before scheduled_date")
+    record = MaintenanceRecord(vehicle_id=payload.vehicle_id, maintenance_type=payload.maintenance_type, status=payload.status, scheduled_date=payload.scheduled_date, completed_date=payload.completed_date, description=payload.description, cost=payload.cost)
+    db.add(record); db.commit(); db.refresh(record)
+    return {"id": str(record.id), "vehicle_id": str(record.vehicle_id), "vehicle_code": vehicle.vehicle_code, "maintenance_type": record.maintenance_type, "status": record.status, "scheduled_date": record.scheduled_date, "completed_date": record.completed_date, "description": record.description, "cost": record.cost, "created_at": record.created_at}
+
+@router.get("/maintenance")
+def list_maintenance(vehicle_id: Optional[str] = Query(default=None), status: Optional[str] = Query(default=None), db: Session = Depends(get_db)):
+    query = select(MaintenanceRecord)
+    if vehicle_id: query = query.where(MaintenanceRecord.vehicle_id == vehicle_id)
+    if status: query = query.where(MaintenanceRecord.status == status)
+    records = db.scalars(query.order_by(MaintenanceRecord.created_at.desc())).all()
+    return {"count": len(records), "maintenance": [{"id": str(r.id), "vehicle_id": str(r.vehicle_id), "vehicle_code": r.vehicle.vehicle_code, "maintenance_type": r.maintenance_type, "status": r.status, "scheduled_date": r.scheduled_date, "completed_date": r.completed_date, "description": r.description, "cost": r.cost, "created_at": r.created_at} for r in records]}
+
+@router.patch("/maintenance/{maintenance_id}/status")
+def update_maintenance_status(maintenance_id: str, payload: MaintenanceStatusUpdate, db: Session = Depends(get_db)):
+    allowed_statuses = {"SCHEDULED", "IN_PROGRESS", "COMPLETED", "CANCELLED"}
+    if payload.status not in allowed_statuses:
+        raise HTTPException(status_code=400, detail=f"Invalid maintenance status. Allowed values: {sorted(allowed_statuses)}")
+    record = db.get(MaintenanceRecord, maintenance_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Maintenance record not found")
+    record.status = payload.status
+    if payload.status == "COMPLETED" and record.completed_date is None:
+        record.completed_date = date.today()
+    db.commit(); db.refresh(record)
+    return {"id": str(record.id), "vehicle_id": str(record.vehicle_id), "vehicle_code": record.vehicle.vehicle_code, "maintenance_type": record.maintenance_type, "status": record.status, "scheduled_date": record.scheduled_date, "completed_date": record.completed_date, "updated_at": record.updated_at}

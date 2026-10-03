@@ -21,6 +21,9 @@ from app.models.demand import DemandRecord
 from app.models.vehicle import Vehicle
 from app.models.shipment import Shipment
 
+from app.models.supplier import Supplier
+from app.models.maintenance import MaintenanceRecord
+
 
 __all__ = [
     "Base",
@@ -40,4 +43,6 @@ __all__ = [
     "DemandRecord",
     "Vehicle",
     "Shipment",
+    "Supplier",
+    "MaintenanceRecord",
 ]
