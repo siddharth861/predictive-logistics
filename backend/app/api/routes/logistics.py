@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -14,6 +14,7 @@ from app.models import (
     Inventory,
     Item,
     Location,
+    Shipment,
     Vehicle,
 )
 
@@ -25,9 +26,9 @@ router = APIRouter(prefix="/api/logistics", tags=["Logistics"])
 # ============================================================
 
 class LocationCreate(BaseModel):
-    code: str = Field(min_length=1, max_length=100)
-    name: str = Field(min_length=1, max_length=255)
-    location_type: str = Field(min_length=1, max_length=100)
+    code: str = Field(min_length=1, max_length=50)
+    name: str = Field(min_length=1, max_length=150)
+    location_type: str = Field(min_length=1, max_length=50)
     latitude: float
     longitude: float
     description: Optional[str] = None
@@ -89,9 +90,34 @@ class VehicleCreate(BaseModel):
     vehicle_code: str = Field(min_length=1, max_length=100)
     vehicle_type: str = Field(min_length=1, max_length=100)
     capacity: float = Field(gt=0)
-    capacity_unit: str = Field(default="UNIT", min_length=1, max_length=50)
+    capacity_unit: str = Field(
+        default="UNIT",
+        min_length=1,
+        max_length=50,
+    )
     current_location_id: Optional[str] = None
     status: str = "AVAILABLE"
+
+
+# ============================================================
+# SHIPMENT SCHEMAS
+# ============================================================
+
+class ShipmentCreate(BaseModel):
+    shipment_code: str = Field(min_length=1, max_length=100)
+    item_id: str
+    quantity: float = Field(gt=0)
+    source_location_id: str
+    destination_location_id: str
+    vehicle_id: Optional[str] = None
+    status: str = "PLANNED"
+    planned_departure: Optional[datetime] = None
+    estimated_arrival: Optional[datetime] = None
+    notes: Optional[str] = None
+
+
+class ShipmentStatusUpdate(BaseModel):
+    status: str
 
 
 # ============================================================
@@ -104,13 +130,21 @@ def create_location(
     db: Session = Depends(get_db),
 ):
     if not (-90 <= payload.latitude <= 90):
-        raise HTTPException(status_code=400, detail="Invalid latitude")
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid latitude",
+        )
 
     if not (-180 <= payload.longitude <= 180):
-        raise HTTPException(status_code=400, detail="Invalid longitude")
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid longitude",
+        )
 
     existing = db.scalar(
-        select(Location).where(Location.code == payload.code)
+        select(Location).where(
+            Location.code == payload.code
+        )
     )
 
     if existing:
@@ -126,7 +160,7 @@ def create_location(
         name=payload.name,
         location_type=payload.location_type,
         description=payload.description,
-        geom=WKTElement(
+        geometry=WKTElement(
             f"POINT({payload.longitude} {payload.latitude})",
             srid=4326,
         ),
@@ -182,7 +216,9 @@ def create_item(
     db: Session = Depends(get_db),
 ):
     existing = db.scalar(
-        select(Item).where(Item.item_code == payload.item_code)
+        select(Item).where(
+            Item.item_code == payload.item_code
+        )
     )
 
     if existing:
@@ -251,12 +287,20 @@ def create_inventory(
     db: Session = Depends(get_db),
 ):
     item = db.get(Item, payload.item_id)
+
     if not item:
-        raise HTTPException(status_code=404, detail="Item not found")
+        raise HTTPException(
+            status_code=404,
+            detail="Item not found",
+        )
 
     location = db.get(Location, payload.location_id)
+
     if not location:
-        raise HTTPException(status_code=404, detail="Location not found")
+        raise HTTPException(
+            status_code=404,
+            detail="Location not found",
+        )
 
     if not location.is_active:
         raise HTTPException(
@@ -314,8 +358,9 @@ def list_inventory(
     db: Session = Depends(get_db),
 ):
     records = db.scalars(
-        select(Inventory)
-        .order_by(Inventory.created_at.desc())
+        select(Inventory).order_by(
+            Inventory.created_at.desc()
+        )
     ).all()
 
     return {
@@ -349,17 +394,26 @@ def create_consumption(
     db: Session = Depends(get_db),
 ):
     item = db.get(Item, payload.item_id)
+
     if not item:
-        raise HTTPException(status_code=404, detail="Item not found")
+        raise HTTPException(
+            status_code=404,
+            detail="Item not found",
+        )
 
     location = db.get(Location, payload.location_id)
-    if not location:
-        raise HTTPException(status_code=404, detail="Location not found")
 
-    source = None
+    if not location:
+        raise HTTPException(
+            status_code=404,
+            detail="Location not found",
+        )
 
     if payload.source_id:
-        source = db.get(DataSource, payload.source_id)
+        source = db.get(
+            DataSource,
+            payload.source_id,
+        )
 
         if not source:
             raise HTTPException(
@@ -387,7 +441,11 @@ def create_consumption(
         "location_name": location.name,
         "consumption_date": record.consumption_date,
         "quantity": record.quantity,
-        "source_id": str(record.source_id) if record.source_id else None,
+        "source_id": (
+            str(record.source_id)
+            if record.source_id
+            else None
+        ),
         "created_at": record.created_at,
     }
 
@@ -423,7 +481,9 @@ def list_consumption(
         )
 
     records = db.scalars(
-        query.order_by(ConsumptionRecord.consumption_date.desc())
+        query.order_by(
+            ConsumptionRecord.consumption_date.desc()
+        )
     ).all()
 
     return {
@@ -437,9 +497,11 @@ def list_consumption(
                 "location_name": record.location.name,
                 "consumption_date": record.consumption_date,
                 "quantity": record.quantity,
-                "source_id": str(record.source_id)
-                if record.source_id
-                else None,
+                "source_id": (
+                    str(record.source_id)
+                    if record.source_id
+                    else None
+                ),
                 "created_at": record.created_at,
             }
             for record in records
@@ -457,15 +519,26 @@ def create_demand(
     db: Session = Depends(get_db),
 ):
     item = db.get(Item, payload.item_id)
+
     if not item:
-        raise HTTPException(status_code=404, detail="Item not found")
+        raise HTTPException(
+            status_code=404,
+            detail="Item not found",
+        )
 
     location = db.get(Location, payload.location_id)
+
     if not location:
-        raise HTTPException(status_code=404, detail="Location not found")
+        raise HTTPException(
+            status_code=404,
+            detail="Location not found",
+        )
 
     if payload.source_id:
-        source = db.get(DataSource, payload.source_id)
+        source = db.get(
+            DataSource,
+            payload.source_id,
+        )
 
         if not source:
             raise HTTPException(
@@ -493,7 +566,11 @@ def create_demand(
         "location_name": location.name,
         "demand_date": record.demand_date,
         "quantity": record.quantity,
-        "source_id": str(record.source_id) if record.source_id else None,
+        "source_id": (
+            str(record.source_id)
+            if record.source_id
+            else None
+        ),
         "created_at": record.created_at,
     }
 
@@ -529,7 +606,9 @@ def list_demand(
         )
 
     records = db.scalars(
-        query.order_by(DemandRecord.demand_date.desc())
+        query.order_by(
+            DemandRecord.demand_date.desc()
+        )
     ).all()
 
     return {
@@ -543,9 +622,11 @@ def list_demand(
                 "location_name": record.location.name,
                 "demand_date": record.demand_date,
                 "quantity": record.quantity,
-                "source_id": str(record.source_id)
-                if record.source_id
-                else None,
+                "source_id": (
+                    str(record.source_id)
+                    if record.source_id
+                    else None
+                ),
                 "created_at": record.created_at,
             }
             for record in records
@@ -584,7 +665,10 @@ def create_vehicle(
     if payload.status not in allowed_statuses:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid status. Allowed values: {sorted(allowed_statuses)}",
+            detail=(
+                "Invalid status. "
+                f"Allowed values: {sorted(allowed_statuses)}"
+            ),
         )
 
     location = None
@@ -644,7 +728,9 @@ def list_vehicles(
     query = select(Vehicle)
 
     if status:
-        query = query.where(Vehicle.status == status)
+        query = query.where(
+            Vehicle.status == status
+        )
 
     vehicles = db.scalars(
         query.order_by(Vehicle.vehicle_code)
@@ -675,4 +761,280 @@ def list_vehicles(
             }
             for vehicle in vehicles
         ],
+    }
+
+
+# ============================================================
+# SHIPMENTS
+# ============================================================
+
+@router.post("/shipments")
+def create_shipment(
+    payload: ShipmentCreate,
+    db: Session = Depends(get_db),
+):
+    existing = db.scalar(
+        select(Shipment).where(
+            Shipment.shipment_code == payload.shipment_code
+        )
+    )
+
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail="Shipment code already exists",
+        )
+
+    allowed_statuses = {
+        "PLANNED",
+        "DISPATCHED",
+        "IN_TRANSIT",
+        "DELIVERED",
+        "DELAYED",
+        "CANCELLED",
+    }
+
+    if payload.status not in allowed_statuses:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Invalid shipment status. "
+                f"Allowed values: {sorted(allowed_statuses)}"
+            ),
+        )
+
+    item = db.get(Item, payload.item_id)
+
+    if not item:
+        raise HTTPException(
+            status_code=404,
+            detail="Item not found",
+        )
+
+    source = db.get(
+        Location,
+        payload.source_location_id,
+    )
+
+    if not source:
+        raise HTTPException(
+            status_code=404,
+            detail="Source location not found",
+        )
+
+    destination = db.get(
+        Location,
+        payload.destination_location_id,
+    )
+
+    if not destination:
+        raise HTTPException(
+            status_code=404,
+            detail="Destination location not found",
+        )
+
+    if (
+        payload.source_location_id
+        == payload.destination_location_id
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Source and destination locations "
+                "must be different"
+            ),
+        )
+
+    vehicle = None
+
+    if payload.vehicle_id:
+        vehicle = db.get(
+            Vehicle,
+            payload.vehicle_id,
+        )
+
+        if not vehicle:
+            raise HTTPException(
+                status_code=404,
+                detail="Vehicle not found",
+            )
+
+        if not vehicle.is_active:
+            raise HTTPException(
+                status_code=400,
+                detail="Vehicle is inactive",
+            )
+
+        if payload.quantity > vehicle.capacity:
+            raise HTTPException(
+                status_code=400,
+                detail="Shipment quantity exceeds vehicle capacity",
+            )
+
+    shipment = Shipment(
+        shipment_code=payload.shipment_code,
+        item_id=payload.item_id,
+        quantity=payload.quantity,
+        source_location_id=payload.source_location_id,
+        destination_location_id=payload.destination_location_id,
+        vehicle_id=payload.vehicle_id,
+        status=payload.status,
+        planned_departure=payload.planned_departure,
+        estimated_arrival=payload.estimated_arrival,
+        notes=payload.notes,
+    )
+
+    db.add(shipment)
+    db.commit()
+    db.refresh(shipment)
+
+    return {
+        "id": str(shipment.id),
+        "shipment_code": shipment.shipment_code,
+        "item_code": item.item_code,
+        "item_name": item.name,
+        "quantity": shipment.quantity,
+        "source_location": source.code,
+        "destination_location": destination.code,
+        "vehicle_code": (
+            vehicle.vehicle_code
+            if vehicle
+            else None
+        ),
+        "status": shipment.status,
+        "planned_departure": shipment.planned_departure,
+        "estimated_arrival": shipment.estimated_arrival,
+        "actual_departure": shipment.actual_departure,
+        "actual_arrival": shipment.actual_arrival,
+        "notes": shipment.notes,
+        "created_at": shipment.created_at,
+    }
+
+
+@router.get("/shipments")
+def list_shipments(
+    status: Optional[str] = Query(default=None),
+    vehicle_id: Optional[str] = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    query = select(Shipment)
+
+    if status:
+        query = query.where(
+            Shipment.status == status
+        )
+
+    if vehicle_id:
+        query = query.where(
+            Shipment.vehicle_id == vehicle_id
+        )
+
+    shipments = db.scalars(
+        query.order_by(
+            Shipment.created_at.desc()
+        )
+    ).all()
+
+    return {
+        "count": len(shipments),
+        "shipments": [
+            {
+                "id": str(shipment.id),
+                "shipment_code": shipment.shipment_code,
+                "item_code": shipment.item.item_code,
+                "item_name": shipment.item.name,
+                "quantity": shipment.quantity,
+                "source_location": (
+                    shipment.source_location.code
+                ),
+                "destination_location": (
+                    shipment.destination_location.code
+                ),
+                "vehicle_code": (
+                    shipment.vehicle.vehicle_code
+                    if shipment.vehicle
+                    else None
+                ),
+                "status": shipment.status,
+                "planned_departure": (
+                    shipment.planned_departure
+                ),
+                "actual_departure": (
+                    shipment.actual_departure
+                ),
+                "estimated_arrival": (
+                    shipment.estimated_arrival
+                ),
+                "actual_arrival": (
+                    shipment.actual_arrival
+                ),
+                "notes": shipment.notes,
+                "created_at": shipment.created_at,
+            }
+            for shipment in shipments
+        ],
+    }
+
+
+@router.patch("/shipments/{shipment_id}/status")
+def update_shipment_status(
+    shipment_id: str,
+    payload: ShipmentStatusUpdate,
+    db: Session = Depends(get_db),
+):
+    allowed_statuses = {
+        "PLANNED",
+        "DISPATCHED",
+        "IN_TRANSIT",
+        "DELIVERED",
+        "DELAYED",
+        "CANCELLED",
+    }
+
+    if payload.status not in allowed_statuses:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Invalid shipment status. "
+                f"Allowed values: {sorted(allowed_statuses)}"
+            ),
+        )
+
+    shipment = db.get(
+        Shipment,
+        shipment_id,
+    )
+
+    if not shipment:
+        raise HTTPException(
+            status_code=404,
+            detail="Shipment not found",
+        )
+
+    now = datetime.now().astimezone()
+
+    if (
+        payload.status == "DISPATCHED"
+        and shipment.actual_departure is None
+    ):
+        shipment.actual_departure = now
+
+    if (
+        payload.status == "DELIVERED"
+        and shipment.actual_arrival is None
+    ):
+        shipment.actual_arrival = now
+
+    shipment.status = payload.status
+
+    db.commit()
+    db.refresh(shipment)
+
+    return {
+        "id": str(shipment.id),
+        "shipment_code": shipment.shipment_code,
+        "status": shipment.status,
+        "actual_departure": shipment.actual_departure,
+        "actual_arrival": shipment.actual_arrival,
+        "updated_at": shipment.updated_at,
     }

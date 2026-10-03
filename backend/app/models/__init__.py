@@ -19,6 +19,7 @@ from app.models.consumption import ConsumptionRecord
 from app.models.demand import DemandRecord
 
 from app.models.vehicle import Vehicle
+from app.models.shipment import Shipment
 
 
 __all__ = [
@@ -38,4 +39,5 @@ __all__ = [
     "ConsumptionRecord",
     "DemandRecord",
     "Vehicle",
+    "Shipment",
 ]
