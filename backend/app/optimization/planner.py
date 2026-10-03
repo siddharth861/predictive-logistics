@@ -73,23 +73,50 @@ def select_vehicle(
     vehicles: list[VehicleOption],
 ) -> VehicleOption | None:
     """
-    Select the smallest available vehicle capable of carrying
-    the recommended quantity.
+    Select the most suitable available vehicle.
+
+    Selection priority:
+    1. Vehicle must be active.
+    2. Vehicle must be AVAILABLE.
+    3. Vehicle must have sufficient capacity.
+    4. Prefer a vehicle already at the destination/source
+       logistics location.
+    5. Prefer shorter route distance.
+    6. Prefer shorter estimated travel time.
+    7. Prefer smaller sufficient capacity to avoid unnecessary
+       transport capacity usage.
     """
 
-    available_vehicles = [
+    eligible_vehicles = [
         vehicle
         for vehicle in vehicles
-        if vehicle.status == "AVAILABLE"
+        if vehicle.is_active
+        and vehicle.status == "AVAILABLE"
         and vehicle.capacity >= recommended_quantity
     ]
 
-    if not available_vehicles:
+    if not eligible_vehicles:
         return None
 
+    def vehicle_sort_key(vehicle: VehicleOption):
+        return (
+            0 if vehicle.distance_km == 0 else 1,
+            (
+                vehicle.distance_km
+                if vehicle.distance_km is not None
+                else float("inf")
+            ),
+            (
+                vehicle.estimated_travel_hours
+                if vehicle.estimated_travel_hours is not None
+                else float("inf")
+            ),
+            vehicle.capacity,
+        )
+
     return min(
-        available_vehicles,
-        key=lambda vehicle: vehicle.capacity,
+        eligible_vehicles,
+        key=vehicle_sort_key,
     )
 
 
@@ -97,13 +124,14 @@ def build_optimization_plan(
     optimization_input: OptimizationInput,
 ) -> OptimizationResult:
     """
-    Build a demand-aware resupply plan.
+    Build a demand-aware resupply and vehicle allocation plan.
 
-    Stage 10.2 introduces:
-    - planning horizon
-    - expected consumption
-    - safety buffer
-    - maximum stock ceiling
+    Stage 10.3 adds transport allocation using:
+    - vehicle availability
+    - vehicle active state
+    - vehicle capacity
+    - route distance
+    - estimated travel time
     """
 
     constraints: list[OptimizationConstraint] = []
@@ -217,7 +245,8 @@ def build_optimization_plan(
             code="SAFETY_BUFFER",
             passed=True,
             message=(
-                f"Safety buffer adds {safety_buffer_quantity:.2f} "
+                f"Safety buffer adds "
+                f"{safety_buffer_quantity:.2f} "
                 f"{optimization_input.unit}."
             ),
         )
@@ -273,11 +302,11 @@ def build_optimization_plan(
     if selected_vehicle is None:
         constraints.append(
             OptimizationConstraint(
-                code="VEHICLE_CAPACITY",
+                code="VEHICLE_ALLOCATION",
                 passed=False,
                 message=(
-                    "No available vehicle has sufficient capacity "
-                    "for the recommended resupply quantity."
+                    "No active available vehicle has sufficient "
+                    "capacity for the recommended resupply quantity."
                 ),
             )
         )
@@ -296,20 +325,56 @@ def build_optimization_plan(
             constraints=constraints,
             explanation=(
                 "A demand-based resupply quantity was calculated, "
-                "but no available vehicle can carry it."
+                "but no suitable available vehicle could be allocated."
             ),
         )
+
+    constraints.append(
+        OptimizationConstraint(
+            code="VEHICLE_ALLOCATION",
+            passed=True,
+            message=(
+                f"Vehicle {selected_vehicle.vehicle_code} selected "
+                f"for the resupply movement."
+            ),
+        )
+    )
 
     constraints.append(
         OptimizationConstraint(
             code="VEHICLE_CAPACITY",
             passed=True,
             message=(
-                f"Vehicle {selected_vehicle.vehicle_code} can carry "
-                f"the recommended resupply quantity."
+                f"Vehicle {selected_vehicle.vehicle_code} has "
+                f"{selected_vehicle.capacity:.2f} "
+                f"{selected_vehicle.capacity_unit} capacity."
             ),
         )
     )
+
+    if selected_vehicle.distance_km is not None:
+        constraints.append(
+            OptimizationConstraint(
+                code="ROUTE_DISTANCE",
+                passed=True,
+                message=(
+                    f"Selected vehicle route distance is "
+                    f"{selected_vehicle.distance_km:.3f} km."
+                ),
+            )
+        )
+
+    if selected_vehicle.estimated_travel_hours is not None:
+        constraints.append(
+            OptimizationConstraint(
+                code="TRAVEL_TIME",
+                passed=True,
+                message=(
+                    f"Estimated travel time is "
+                    f"{selected_vehicle.estimated_travel_hours:.2f} hours."
+                ),
+            )
+        )
 
     return OptimizationResult(
         feasible=True,
@@ -322,6 +387,12 @@ def build_optimization_plan(
         expected_consumption=expected_consumption,
         safety_buffer_quantity=safety_buffer_quantity,
         target_stock=target_stock,
+        selected_vehicle_capacity=selected_vehicle.capacity,
+        selected_vehicle_capacity_unit=selected_vehicle.capacity_unit,
+        selected_vehicle_distance_km=selected_vehicle.distance_km,
+        selected_vehicle_travel_hours=(
+            selected_vehicle.estimated_travel_hours
+        ),
         constraints=constraints,
         explanation=(
             f"Recommend resupplying "
