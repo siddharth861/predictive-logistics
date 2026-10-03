@@ -3,8 +3,10 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from app.ai.anomaly import detect_consumption_anomalies
 from app.ai.eta import predict_shipment_eta
 from app.ai.forecast import predict_next_day_consumption
+from app.ai.risk import calculate_supply_risk
 from app.ai.stockout import predict_stockout_risk
 from app.db.session import get_db
 
@@ -88,4 +90,50 @@ def get_shipment_eta(
         raise HTTPException(
             status_code=404,
             detail="Shipment ETA model has not been trained yet.",
+        ) from exc
+
+
+@router.get("/risk/{item_id}/{location_id}")
+def get_supply_risk(
+    item_id: UUID,
+    location_id: UUID,
+    db: Session = Depends(get_db),
+):
+    try:
+        return calculate_supply_risk(
+            db=db,
+            item_id=item_id,
+            location_id=location_id,
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
+
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="Required AI model has not been trained yet.",
+        ) from exc
+
+
+@router.get("/anomaly/{item_id}/{location_id}")
+def get_consumption_anomalies(
+    item_id: UUID,
+    location_id: UUID,
+    db: Session = Depends(get_db),
+):
+    try:
+        return detect_consumption_anomalies(
+            db=db,
+            item_id=item_id,
+            location_id=location_id,
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
         ) from exc
