@@ -2,6 +2,7 @@ from uuid import UUID
 from app.models.mapping_config import MappingConfig
 from app.ingestion.mapping_engine import (
     apply_mapping_to_staging_records,
+    build_mapping_configuration,
     save_mapping_configuration,
 )
 from app.ingestion.validator import (
@@ -503,6 +504,118 @@ def detect_uploaded_schema(
         "detections": detection_results,
         "conflicts": conflicts,
     }
+
+@router.post("/assistant")
+def data_assistant(
+    source_id: UUID,
+    db: Session = Depends(get_db),
+):
+    """
+    Analyze the latest staged data and return Data Assistant
+    mapping suggestions with confidence and decision levels.
+    """
+
+    data_source = (
+        db.query(DataSource)
+        .filter(DataSource.id == source_id)
+        .first()
+    )
+
+    if not data_source:
+        raise HTTPException(
+            status_code=404,
+            detail="Data source not found.",
+        )
+
+    ingestion_job = (
+        db.query(IngestionJob)
+        .filter(IngestionJob.source_id == source_id)
+        .order_by(IngestionJob.created_at.desc())
+        .first()
+    )
+
+    if not ingestion_job:
+        raise HTTPException(
+            status_code=404,
+            detail="No ingestion job found for this source.",
+        )
+
+    staging_records = (
+        db.query(StagingRecord)
+        .filter(
+            StagingRecord.ingestion_job_id == ingestion_job.id
+        )
+        .order_by(StagingRecord.row_number)
+        .all()
+    )
+
+    if not staging_records:
+        raise HTTPException(
+            status_code=400,
+            detail="No staging records available for Data Assistant.",
+        )
+
+    rows = [
+        record.raw_data
+        for record in staging_records
+    ]
+
+    columns = list(rows[0].keys())
+
+    detection_results = detect_schema(
+        columns,
+        rows,
+    )
+
+    detection_results = mark_unmapped_columns(
+        detection_results
+    )
+
+    conflicts = detect_mapping_conflicts(
+        detection_results
+    )
+
+    mapping_configuration = build_mapping_configuration(
+        detection_results
+    )
+
+    auto_count = sum(
+        1
+        for result in detection_results
+        if result["decision"] == "AUTO"
+    )
+
+    suggested_count = sum(
+        1
+        for result in detection_results
+        if result["decision"] == "SUGGEST"
+    )
+
+    review_count = sum(
+        1
+        for result in detection_results
+        if result["decision"] == "REVIEW"
+    )
+
+    return {
+        "assistant": "Data Assistant",
+        "source_id": str(source_id),
+        "ingestion_job_id": str(ingestion_job.id),
+        "columns": columns,
+        "row_count": len(rows),
+        "summary": {
+            "total_columns": len(detection_results),
+            "auto_mapped": auto_count,
+            "suggestions": suggested_count,
+            "needs_review": review_count,
+            "conflicts": len(conflicts),
+        },
+        "suggestions": detection_results,
+        "mapping_configuration": mapping_configuration,
+        "conflicts": conflicts,
+    }
+
+
 @router.post("/save-mapping")
 def save_detected_mapping(
     source_id: UUID,

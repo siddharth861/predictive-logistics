@@ -5,6 +5,7 @@ from sqlalchemy import text
 from app.api.routes.auth import router as auth_router
 from app.api.routes.ingestion import router as ingestion_router
 from app.api.routes.management import router as management_router
+from app.api.routes.mapping_assistant import router as mapping_assistant_router
 from app.db.session import engine
 
 
@@ -32,6 +33,7 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(ingestion_router)
 app.include_router(management_router)
+app.include_router(mapping_assistant_router)
 
 
 @app.get("/")
