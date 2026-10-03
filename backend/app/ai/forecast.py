@@ -1,60 +1,62 @@
 from __future__ import annotations
 
-from pathlib import Path
 import uuid
+from pathlib import Path
+from typing import Any
 
 import joblib
 import numpy as np
-import pandas as pd
+from sqlalchemy import select
 from sqlalchemy.orm import Session
+from sklearn.ensemble import RandomForestRegressor
 
 from app.ai.features import build_consumption_features
-from app.ai.training import FEATURE_COLUMNS, prepare_training_data
+from app.models.consumption import ConsumptionRecord
 from app.models.item import Item
 
 
-MODEL_PATH = Path("/app/storage/models/consumption_forecast.joblib")
+MODEL_PATH = Path(
+    "/app/storage/models/consumption_forecast.joblib"
+)
+
+FEATURE_COLUMNS = [
+    "day_of_week",
+    "lag_1",
+    "lag_7",
+    "rolling_mean_7",
+    "rolling_std_7",
+    "rolling_mean_14",
+    "rolling_mean_30",
+]
 
 
 def train_consumption_model(
     db: Session,
     item_id: uuid.UUID,
     location_id: uuid.UUID,
-) -> dict:
-    """
-    Train a Random Forest model to predict NEXT-DAY consumption.
-
-    Each training row uses historical information available on day D
-    to predict consumption on day D+1.
-    """
-
+) -> dict[str, Any]:
     features = build_consumption_features(
         db=db,
         item_id=item_id,
         location_id=location_id,
     )
 
-    if features.empty:
-        raise ValueError("No consumption data available for training.")
+    features["target_next_day"] = (
+        features["quantity"].shift(-1)
+    )
 
-    # Target = next day's consumption.
-    features = features.copy()
-    features["target_next_day"] = features["quantity"].shift(-1)
-
-    # Remove the final row because there is no known next-day target.
-    features = features.dropna(
+    training_data = features.dropna(
         subset=FEATURE_COLUMNS + ["target_next_day"]
     )
 
-    if len(features) < 10:
+    if len(training_data) < 10:
         raise ValueError(
-            "At least 10 training samples are required."
+            "At least 10 complete records are required "
+            "to train the consumption model."
         )
 
-    X = features[FEATURE_COLUMNS]
-    y = features["target_next_day"]
-
-    from sklearn.ensemble import RandomForestRegressor
+    X = training_data[FEATURE_COLUMNS]
+    y = training_data["target_next_day"]
 
     model = RandomForestRegressor(
         n_estimators=100,
@@ -72,20 +74,17 @@ def train_consumption_model(
     joblib.dump(
         {
             "model": model,
-            "item_id": str(item_id),
-            "location_id": str(location_id),
             "feature_columns": FEATURE_COLUMNS,
+            "training_samples": len(training_data),
         },
         MODEL_PATH,
     )
 
     return {
-        "message": "Consumption forecast model trained successfully.",
-        "model_path": str(MODEL_PATH),
-        "item_id": str(item_id),
-        "location_id": str(location_id),
-        "training_samples": len(X),
+        "status": "trained",
+        "training_samples": len(training_data),
         "features": FEATURE_COLUMNS,
+        "model_path": str(MODEL_PATH),
     }
 
 
@@ -93,16 +92,18 @@ def predict_next_day_consumption(
     db: Session,
     item_id: uuid.UUID,
     location_id: uuid.UUID,
-) -> dict:
-    """
-    Predict consumption for the next day using the latest available
-    historical consumption data.
-    """
-
+) -> dict[str, Any]:
     if not MODEL_PATH.exists():
-        raise FileNotFoundError(
-            "Forecast model has not been trained yet."
+        train_consumption_model(
+            db=db,
+            item_id=item_id,
+            location_id=location_id,
         )
+
+    artifact = joblib.load(MODEL_PATH)
+
+    model = artifact["model"]
+    feature_columns = artifact["feature_columns"]
 
     features = build_consumption_features(
         db=db,
@@ -110,90 +111,104 @@ def predict_next_day_consumption(
         location_id=location_id,
     )
 
-    if features.empty:
-        raise ValueError(
-            "No historical consumption data available."
-        )
+    latest = features.dropna(
+        subset=feature_columns
+    ).iloc[-1]
 
-    latest = features.iloc[[-1]][FEATURE_COLUMNS]
-
-    model_data = joblib.load(MODEL_PATH)
-    model = model_data["model"]
-
-    # Use individual trees to estimate prediction uncertainty.
-    tree_predictions = np.array(
-        [
-            estimator.predict(latest.to_numpy())[0]
-            for estimator in model.estimators_
-        ]
-    )
+    X_latest = latest[
+        feature_columns
+    ].to_frame().T
 
     predicted_quantity = float(
-        np.mean(tree_predictions)
+        model.predict(X_latest)[0]
     )
 
-    prediction_std = float(
-        np.std(tree_predictions)
+    training_data = features.copy()
+
+    training_data["target_next_day"] = (
+        training_data["quantity"].shift(-1)
     )
+
+    training_data = training_data.dropna(
+        subset=feature_columns + ["target_next_day"]
+    )
+
+    training_samples = len(training_data)
+
+    residuals = (
+        training_data["target_next_day"]
+        - model.predict(
+            training_data[feature_columns]
+        )
+    )
+
+    residual_std = float(
+        np.std(residuals)
+    )
+
+    if residual_std <= 0:
+        residual_std = max(
+            predicted_quantity * 0.10,
+            1.0,
+        )
 
     lower_bound = max(
         0.0,
-        predicted_quantity - (1.96 * prediction_std),
+        predicted_quantity
+        - (1.38 * residual_std),
     )
 
-    upper_bound = max(
+    upper_bound = (
+        predicted_quantity
+        + (1.38 * residual_std)
+    )
+
+    interval_width = (
+        upper_bound - lower_bound
+    )
+
+    confidence = max(
         0.0,
-        predicted_quantity + (1.96 * prediction_std),
+        min(
+            99.0,
+            100.0
+            - (
+                interval_width
+                / max(
+                    predicted_quantity,
+                    1.0,
+                )
+                * 100.0
+            ),
+        ),
     )
 
-    if predicted_quantity > 0:
-        confidence = max(
-            0.0,
-            min(
-                100.0,
-                100.0 * (
-                    1.0 - (
-                        prediction_std
-                        / predicted_quantity
-                    )
-                ),
-            ),
+    latest_record = db.scalar(
+        select(ConsumptionRecord)
+        .where(
+            ConsumptionRecord.item_id == item_id,
+            ConsumptionRecord.location_id == location_id,
         )
-    else:
-        confidence = 0.0
+        .order_by(
+            ConsumptionRecord.consumption_date.desc()
+        )
+    )
 
-    item = db.get(Item, item_id)
+    if latest_record is None:
+        raise ValueError(
+            "No consumption data available."
+        )
+
+    item = db.scalar(
+        select(Item).where(
+            Item.id == item_id
+        )
+    )
 
     unit = (
         item.unit
         if item is not None
-        else "UNIT"
-    )
-
-    previous_day_consumption = float(
-        features.iloc[-1]["quantity"]
-    )
-
-    previous_week_consumption = (
-        float(features.iloc[-8]["quantity"])
-        if len(features) >= 8
         else None
-    )
-
-    recent_7_day_average = float(
-        features.iloc[-1]["rolling_mean_7"]
-    )
-
-    recent_7_day_variability = float(
-        features.iloc[-1]["rolling_std_7"]
-    )
-
-    recent_14_day_average = float(
-        features.iloc[-1]["rolling_mean_14"]
-    )
-
-    recent_30_day_average = float(
-        features.iloc[-1]["rolling_mean_30"]
     )
 
     return {
@@ -216,39 +231,43 @@ def predict_next_day_consumption(
             2,
         ),
         "unit": unit,
-        "training_samples": len(
-            features.dropna(
-                subset=FEATURE_COLUMNS
-            )
-        ),
+        "training_samples": training_samples,
         "forecast_horizon": "NEXT_DAY",
         "explanation": {
             "previous_day_consumption": round(
-                previous_day_consumption,
+                float(
+                    latest["lag_1"]
+                ),
                 2,
             ),
-            "previous_week_consumption": (
-                round(
-                    previous_week_consumption,
-                    2,
-                )
-                if previous_week_consumption is not None
-                else None
+            "previous_week_consumption": round(
+                float(
+                    latest["lag_7"]
+                ),
+                2,
             ),
             "recent_7_day_average": round(
-                recent_7_day_average,
+                float(
+                    latest["rolling_mean_7"]
+                ),
                 2,
             ),
             "recent_7_day_variability": round(
-                recent_7_day_variability,
+                float(
+                    latest["rolling_std_7"]
+                ),
                 2,
             ),
             "recent_14_day_average": round(
-                recent_14_day_average,
+                float(
+                    latest["rolling_mean_14"]
+                ),
                 2,
             ),
             "recent_30_day_average": round(
-                recent_30_day_average,
+                float(
+                    latest["rolling_mean_30"]
+                ),
                 2,
             ),
         },

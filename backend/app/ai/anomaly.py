@@ -1,26 +1,37 @@
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
-import numpy as np
-import pandas as pd
+from sklearn.ensemble import IsolationForest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.ai.features import build_consumption_features
+from app.models.consumption import ConsumptionRecord
 
 
 def detect_consumption_anomalies(
     db: Session,
     item_id: uuid.UUID,
     location_id: uuid.UUID,
-) -> dict:
-    """
-    Detect unusual consumption values using Isolation Forest.
+) -> dict[str, Any]:
+    records = db.scalars(
+        select(ConsumptionRecord)
+        .where(
+            ConsumptionRecord.item_id == item_id,
+            ConsumptionRecord.location_id == location_id,
+        )
+        .order_by(
+            ConsumptionRecord.consumption_date
+        )
+    ).all()
 
-    The model learns the normal consumption pattern from the
-    available historical consumption records.
-    """
+    if len(records) < 10:
+        raise ValueError(
+            "At least 10 consumption records are required "
+            "for anomaly detection."
+        )
 
     features = build_consumption_features(
         db=db,
@@ -28,14 +39,7 @@ def detect_consumption_anomalies(
         location_id=location_id,
     )
 
-    if features.empty:
-        raise ValueError(
-            "No historical consumption data available."
-        )
-
-    data = features.copy()
-
-    required_columns = [
+    feature_columns = [
         "quantity",
         "day_of_week",
         "lag_1",
@@ -44,19 +48,15 @@ def detect_consumption_anomalies(
         "rolling_std_7",
     ]
 
-    data = data.dropna(
-        subset=required_columns
-    )
+    model_data = features.dropna(
+        subset=feature_columns
+    ).copy()
 
-    if len(data) < 10:
+    if len(model_data) < 10:
         raise ValueError(
-            "At least 10 consumption records are required "
+            "Not enough complete feature records "
             "for anomaly detection."
         )
-
-    X = data[required_columns]
-
-    from sklearn.ensemble import IsolationForest
 
     model = IsolationForest(
         n_estimators=100,
@@ -64,47 +64,38 @@ def detect_consumption_anomalies(
         random_state=42,
     )
 
-    predictions = model.fit_predict(X)
-
-    scores = model.decision_function(X)
-
-    data["anomaly_prediction"] = predictions
-    data["anomaly_score"] = scores
-
-    anomalies = data[
-        data["anomaly_prediction"] == -1
-    ]
-
-    latest = data.iloc[-1]
-
-    latest_is_anomaly = (
-        int(latest["anomaly_prediction"]) == -1
+    predictions = model.fit_predict(
+        model_data[feature_columns]
     )
 
-    latest_score = float(
-        latest["anomaly_score"]
+    scores = model.decision_function(
+        model_data[feature_columns]
+    )
+
+    model_data["prediction"] = predictions
+    model_data["anomaly_score"] = scores
+
+    anomaly_rows = model_data[
+        model_data["prediction"] == -1
+    ]
+
+    latest = model_data.iloc[-1]
+
+    latest_is_anomaly = (
+        int(latest["prediction"]) == -1
     )
 
     if latest_is_anomaly:
-        anomaly_level = "HIGH"
-    elif latest_score < 0.10:
-        anomaly_level = "MEDIUM"
+        latest_level = "HIGH"
     else:
-        anomaly_level = "NORMAL"
+        latest_level = "NORMAL"
 
-    anomaly_records = []
+    anomalies = []
 
-    for _, row in anomalies.iterrows():
-        anomaly_records.append(
+    for _, row in anomaly_rows.iterrows():
+        anomalies.append(
             {
-                "date": (
-                    row["date"].isoformat()
-                    if hasattr(
-                        row["date"],
-                        "isoformat",
-                    )
-                    else str(row["date"])
-                ),
+                "date": row["date"].isoformat(),
                 "quantity": round(
                     float(row["quantity"]),
                     2,
@@ -123,27 +114,20 @@ def detect_consumption_anomalies(
     return {
         "item_id": str(item_id),
         "location_id": str(location_id),
-        "records_analyzed": len(data),
+        "records_analyzed": len(model_data),
         "anomalies_detected": len(anomalies),
         "latest_record": {
-            "date": (
-                latest["date"].isoformat()
-                if hasattr(
-                    latest["date"],
-                    "isoformat",
-                )
-                else str(latest["date"])
-            ),
+            "date": latest["date"].isoformat(),
             "quantity": round(
                 float(latest["quantity"]),
                 2,
             ),
             "anomaly_score": round(
-                latest_score,
+                float(latest["anomaly_score"]),
                 4,
             ),
             "is_anomaly": latest_is_anomaly,
-            "anomaly_level": anomaly_level,
+            "anomaly_level": latest_level,
         },
-        "anomalies": anomaly_records,
+        "anomalies": anomalies,
     }
