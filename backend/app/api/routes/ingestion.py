@@ -4,13 +4,10 @@ from app.ingestion.mapping_engine import (
     apply_mapping_to_staging_records,
     save_mapping_configuration,
 )
-from app.ingestion.mapping_engine import (
-    apply_mapping_to_staging_records,
-    save_mapping_configuration,
-)
 from app.ingestion.validator import (
     validate_records,
     update_staging_record_status,
+    store_validation_errors,
 )
 
 from app.ingestion.schema_detector import (
@@ -142,6 +139,32 @@ def detect_category(
     return DataSourceCategory.CUSTOM
 
 
+def json_safe_value(value):
+    """Convert pandas/NumPy values into JSON-safe Python values."""
+    if value is None:
+        return None
+
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except (ValueError, TypeError):
+            pass
+
+    if isinstance(value, (list, tuple)):
+        return [json_safe_value(item) for item in value]
+
+    if isinstance(value, dict):
+        return {str(key): json_safe_value(item) for key, item in value.items()}
+
+    return value
+
+
 def dataframe_to_staging_records(
     dataframe: pd.DataFrame,
     ingestion_job_id,
@@ -152,10 +175,7 @@ def dataframe_to_staging_records(
         raw_data = {}
 
         for column, value in row.items():
-            if pd.isna(value):
-                raw_data[str(column)] = None
-            else:
-                raw_data[str(column)] = value
+            raw_data[str(column)] = json_safe_value(value)
 
         record = StagingRecord(
             ingestion_job_id=ingestion_job_id,
@@ -167,6 +187,19 @@ def dataframe_to_staging_records(
         records.append(record)
 
     return records
+
+
+def dataframe_preview(dataframe: pd.DataFrame, limit: int = 10) -> list[dict]:
+    """Create a JSON-safe preview from a pandas DataFrame."""
+    preview = []
+
+    for _, row in dataframe.head(limit).iterrows():
+        preview.append({
+            str(column): json_safe_value(value)
+            for column, value in row.items()
+        })
+
+    return preview
 
 
 @router.post(
@@ -302,12 +335,7 @@ async def upload_file(
             for column in dataframe.columns
         ]
 
-        preview = (
-            dataframe
-            .head(10)
-            .where(pd.notna(dataframe), None)
-            .to_dict(orient="records")
-        )
+        preview = dataframe_preview(dataframe)
 
         staging_records = dataframe_to_staging_records(
             dataframe,
@@ -627,19 +655,19 @@ def validate_ingestion(
         )
 
     mapping_config = (
-    db.query(MappingConfig)
-    .filter(
-        MappingConfig.source_id == (
-            db.query(IngestionJob.source_id)
-            .filter(IngestionJob.id == ingestion_job_id)
-            .scalar_subquery()
-        ),
-        MappingConfig.is_active.is_(True),
-    )
-    .order_by(
-        MappingConfig.version.desc()
-    )
-    .first()
+        db.query(MappingConfig)
+        .filter(
+            MappingConfig.source_id == (
+                db.query(IngestionJob.source_id)
+                .filter(IngestionJob.id == ingestion_job_id)
+                .scalar_subquery()
+            ),
+            MappingConfig.is_active.is_(True),
+        )
+        .order_by(
+            MappingConfig.version.desc()
+        )
+        .first()
     )
 
     if not mapping_config:
@@ -668,6 +696,12 @@ def validate_ingestion(
 
     update_staging_record_status(
         staging_records,
+        validation_results,
+    )
+
+    store_validation_errors(
+        db,
+        ingestion_job_id,
         validation_results,
     )
 
