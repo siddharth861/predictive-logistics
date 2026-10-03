@@ -1,4 +1,11 @@
 from typing import Any
+import json
+import uuid
+from datetime import datetime
+
+from sqlalchemy.orm import Session
+
+from app.models.validation_error import ValidationError
 
 
 REQUIRED_FIELDS = {
@@ -6,6 +13,34 @@ REQUIRED_FIELDS = {
     "ITEM_NAME",
     "QUANTITY",
     "LOCATION",
+}
+
+
+QUALITY_RULES = {
+    "REQUIRED_FIELD": {
+        "name": "Required Field",
+        "severity": "ERROR",
+    },
+    "EMPTY_FIELD": {
+        "name": "Empty Field",
+        "severity": "ERROR",
+    },
+    "INVALID_QUANTITY": {
+        "name": "Invalid Quantity",
+        "severity": "ERROR",
+    },
+    "INVALID_DATE": {
+        "name": "Invalid Date",
+        "severity": "ERROR",
+    },
+    "INVALID_TYPE": {
+        "name": "Invalid Type",
+        "severity": "ERROR",
+    },
+    "VALIDATION_ERROR": {
+        "name": "Validation Error",
+        "severity": "ERROR",
+    },
 }
 
 
@@ -18,14 +53,10 @@ def validate_required_fields(
         value = record.get(field)
 
         if value is None:
-            errors.append(
-                f"{field} is required."
-            )
+            errors.append(f"{field} is required.")
 
         elif isinstance(value, str) and not value.strip():
-            errors.append(
-                f"{field} cannot be empty."
-            )
+            errors.append(f"{field} cannot be empty.")
 
     return errors
 
@@ -40,26 +71,90 @@ def validate_quantity(
     if quantity is None:
         return errors
 
+    if isinstance(quantity, bool):
+        errors.append("QUANTITY must be numeric.")
+        return errors
+
     if not isinstance(quantity, (int, float)):
-        errors.append(
-            "QUANTITY must be numeric."
-        )
+        errors.append("QUANTITY must be numeric.")
         return errors
 
     if quantity < 0:
-        errors.append(
-            "QUANTITY cannot be negative."
-        )
+        errors.append("QUANTITY cannot be negative.")
 
     return errors
+
+
+def validate_dates(
+    record: dict[str, Any],
+) -> list[str]:
+    errors = []
+
+    date_fields = [
+        "DATE",
+        "CONSUMPTION_DATE",
+        "SHIPMENT_DATE",
+    ]
+
+    for field in date_fields:
+        value = record.get(field)
+
+        if value is None:
+            continue
+
+        if isinstance(value, datetime):
+            continue
+
+        if isinstance(value, str):
+            try:
+                datetime.fromisoformat(
+                    value.replace("Z", "+00:00")
+                )
+            except ValueError:
+                errors.append(
+                    f"{field} must contain a valid date."
+                )
+
+    return errors
+
+
+def get_rule_for_error(
+    error_message: str,
+) -> dict[str, Any]:
+
+    if "is required" in error_message:
+        return {
+            "rule_code": "REQUIRED_FIELD",
+            "severity": "ERROR",
+        }
+
+    if "cannot be empty" in error_message:
+        return {
+            "rule_code": "EMPTY_FIELD",
+            "severity": "ERROR",
+        }
+
+    if "QUANTITY" in error_message:
+        return {
+            "rule_code": "INVALID_QUANTITY",
+            "severity": "ERROR",
+        }
+
+    if "must contain a valid date" in error_message:
+        return {
+            "rule_code": "INVALID_DATE",
+            "severity": "ERROR",
+        }
+
+    return {
+        "rule_code": "VALIDATION_ERROR",
+        "severity": "ERROR",
+    }
 
 
 def validate_record(
     record: dict[str, Any],
 ) -> dict[str, Any]:
-    """
-    Validate one canonical record.
-    """
 
     errors = []
 
@@ -71,20 +166,42 @@ def validate_record(
         validate_quantity(record)
     )
 
+    errors.extend(
+        validate_dates(record)
+    )
+
+    structured_errors = []
+
+    for error_message in errors:
+        rule = get_rule_for_error(
+            error_message
+        )
+
+        structured_errors.append(
+            {
+                "message": error_message,
+                "rule_code": rule["rule_code"],
+                "severity": rule["severity"],
+            }
+        )
+
     return {
         "valid": len(errors) == 0,
         "errors": errors,
+        "rule_results": structured_errors,
     }
+
+
 def validate_records(
     records: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """
-    Validate multiple canonical records.
-    """
 
     results = []
 
-    for index, record in enumerate(records, start=1):
+    for index, record in enumerate(
+        records,
+        start=1,
+    ):
         validation = validate_record(record)
 
         results.append(
@@ -93,17 +210,18 @@ def validate_records(
                 "record": record,
                 "valid": validation["valid"],
                 "errors": validation["errors"],
+                "rule_results": validation[
+                    "rule_results"
+                ],
             }
         )
 
     return results
+
+
 def separate_valid_and_invalid(
     validation_results: list[dict[str, Any]],
 ) -> dict[str, list[dict[str, Any]]]:
-    """
-    Separate validated records into valid records
-    and quarantined records.
-    """
 
     valid_records = []
     quarantined_records = []
@@ -121,6 +239,9 @@ def separate_valid_and_invalid(
                     ],
                     "record": result["record"],
                     "errors": result["errors"],
+                    "rule_results": result[
+                        "rule_results"
+                    ],
                     "status": "QUARANTINED",
                 }
             )
@@ -129,12 +250,6 @@ def separate_valid_and_invalid(
         "valid": valid_records,
         "quarantined": quarantined_records,
     }
-import json
-import uuid
-
-from sqlalchemy.orm import Session
-
-from app.models.validation_error import ValidationError
 
 
 def store_validation_errors(
@@ -142,9 +257,6 @@ def store_validation_errors(
     ingestion_job_id: uuid.UUID,
     validation_results: list[dict[str, Any]],
 ) -> list[ValidationError]:
-    """
-    Persist validation errors for invalid records.
-    """
 
     errors = []
 
@@ -164,27 +276,34 @@ def store_validation_errors(
 
         for error_message in result["errors"]:
 
-            if "QUANTITY" in error_message:
-                error_code = "INVALID_QUANTITY"
-                field_name = "QUANTITY"
+            rule = get_rule_for_error(
+                error_message
+            )
 
-            elif "required" in error_message.lower():
-                error_code = "REQUIRED_FIELD"
-                field_name = None
+            error_code = rule["rule_code"]
+            field_name = None
 
-                for field in (
-                    "ITEM_CODE",
-                    "ITEM_NAME",
-                    "QUANTITY",
-                    "LOCATION",
-                ):
-                    if field not in record:
+            for field in (
+                "ITEM_CODE",
+                "ITEM_NAME",
+                "QUANTITY",
+                "LOCATION",
+                "DATE",
+                "CONSUMPTION_DATE",
+                "SHIPMENT_DATE",
+            ):
+                if field in error_message:
+                    field_name = field
+                    break
+
+            if (
+                field_name is None
+                and error_code == "REQUIRED_FIELD"
+            ):
+                for field in REQUIRED_FIELDS:
+                    if record.get(field) is None:
                         field_name = field
                         break
-
-            else:
-                error_code = "VALIDATION_ERROR"
-                field_name = None
 
             raw_value = None
 
@@ -213,18 +332,18 @@ def store_validation_errors(
     db.flush()
 
     return errors
+
+
 def update_staging_record_status(
     staging_records: list[Any],
     validation_results: list[dict[str, Any]],
 ) -> None:
-    """
-    Update staging record status based on validation results.
-    """
 
     for staging_record, result in zip(
         staging_records,
         validation_results,
     ):
+
         if result["valid"]:
             staging_record.status = "PROCESSED"
             staging_record.error_message = None
