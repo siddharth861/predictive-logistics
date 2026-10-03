@@ -1,11 +1,15 @@
-from typing import Any
-import json
-import uuid
 from datetime import datetime
+import hashlib
+import math
+from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.models.validation_error import ValidationError
+from app.models.staging_record import StagingRecord, StagingRecordStatus
+from app.models.validation_error import (
+    ValidationError,
+    ValidationErrorStatus,
+)
 
 
 REQUIRED_FIELDS = {
@@ -18,35 +22,33 @@ REQUIRED_FIELDS = {
 
 QUALITY_RULES = {
     "REQUIRED_FIELD": {
-        "name": "Required Field",
+        "description": "Required field is missing.",
         "severity": "ERROR",
     },
     "EMPTY_FIELD": {
-        "name": "Empty Field",
+        "description": "Field is empty.",
         "severity": "ERROR",
     },
     "INVALID_QUANTITY": {
-        "name": "Invalid Quantity",
+        "description": "Quantity must be a non-negative number.",
         "severity": "ERROR",
     },
     "INVALID_DATE": {
-        "name": "Invalid Date",
+        "description": "Date must be a valid ISO date.",
         "severity": "ERROR",
     },
-    "INVALID_TYPE": {
-        "name": "Invalid Type",
-        "severity": "ERROR",
+    "DUPLICATE_RECORD": {
+        "description": "Duplicate record detected.",
+        "severity": "WARNING",
     },
     "VALIDATION_ERROR": {
-        "name": "Validation Error",
+        "description": "Validation error.",
         "severity": "ERROR",
     },
 }
 
 
-def validate_required_fields(
-    record: dict[str, Any],
-) -> list[str]:
+def validate_required_fields(record: dict[str, Any]) -> list[str]:
     errors = []
 
     for field in REQUIRED_FIELDS:
@@ -54,16 +56,13 @@ def validate_required_fields(
 
         if value is None:
             errors.append(f"{field} is required.")
-
         elif isinstance(value, str) and not value.strip():
             errors.append(f"{field} cannot be empty.")
 
     return errors
 
 
-def validate_quantity(
-    record: dict[str, Any],
-) -> list[str]:
+def validate_quantity(record: dict[str, Any]) -> list[str]:
     errors = []
 
     quantity = record.get("QUANTITY")
@@ -71,23 +70,21 @@ def validate_quantity(
     if quantity is None:
         return errors
 
-    if isinstance(quantity, bool):
-        errors.append("QUANTITY must be numeric.")
-        return errors
+    try:
+        numeric_quantity = float(quantity)
 
-    if not isinstance(quantity, (int, float)):
-        errors.append("QUANTITY must be numeric.")
-        return errors
+        if math.isnan(numeric_quantity) or math.isinf(numeric_quantity):
+            errors.append("QUANTITY must be a valid number.")
+        elif numeric_quantity < 0:
+            errors.append("QUANTITY cannot be negative.")
 
-    if quantity < 0:
-        errors.append("QUANTITY cannot be negative.")
+    except (TypeError, ValueError):
+        errors.append("QUANTITY must be a valid number.")
 
     return errors
 
 
-def validate_dates(
-    record: dict[str, Any],
-) -> list[str]:
+def validate_dates(record: dict[str, Any]) -> list[str]:
     errors = []
 
     date_fields = [
@@ -99,64 +96,82 @@ def validate_dates(
     for field in date_fields:
         value = record.get(field)
 
-        if value is None:
+        if value is None or value == "":
             continue
 
-        if isinstance(value, datetime):
-            continue
-
-        if isinstance(value, str):
-            try:
-                datetime.fromisoformat(
-                    value.replace("Z", "+00:00")
-                )
-            except ValueError:
-                errors.append(
-                    f"{field} must contain a valid date."
-                )
+        try:
+            datetime.fromisoformat(str(value))
+        except ValueError:
+            errors.append(
+                f"{field} must be a valid ISO date."
+            )
 
     return errors
 
 
-def get_rule_for_error(
-    error_message: str,
-) -> dict[str, Any]:
+def build_record_fingerprint(record: dict[str, Any]) -> str:
+    item_code = str(record.get("ITEM_CODE", "")).strip().lower()
+    item_name = str(record.get("ITEM_NAME", "")).strip().lower()
+    location = str(record.get("LOCATION", "")).strip().lower()
 
-    if "is required" in error_message:
-        return {
-            "rule_code": "REQUIRED_FIELD",
-            "severity": "ERROR",
-        }
+    fingerprint_source = (
+        f"{item_code}|{item_name}|{location}"
+    )
 
-    if "cannot be empty" in error_message:
-        return {
-            "rule_code": "EMPTY_FIELD",
-            "severity": "ERROR",
-        }
+    return hashlib.sha256(
+        fingerprint_source.encode("utf-8")
+    ).hexdigest()
 
-    if "QUANTITY" in error_message:
-        return {
-            "rule_code": "INVALID_QUANTITY",
-            "severity": "ERROR",
-        }
 
-    if "must contain a valid date" in error_message:
-        return {
-            "rule_code": "INVALID_DATE",
-            "severity": "ERROR",
-        }
+def detect_duplicates(
+    records: list[dict[str, Any]],
+) -> dict[int, str]:
+    fingerprints: dict[str, int] = {}
+    duplicates: dict[int, str] = {}
+
+    for index, record in enumerate(records, start=1):
+        fingerprint = build_record_fingerprint(record)
+
+        if fingerprint in fingerprints:
+            duplicates[index] = fingerprint
+        else:
+            fingerprints[fingerprint] = index
+
+    return duplicates
+
+
+def get_rule_for_error(error_message: str) -> dict[str, str]:
+    message = error_message.lower()
+
+    if "cannot be negative" in message:
+        rule_code = "INVALID_QUANTITY"
+
+    elif "quantity must be a valid number" in message:
+        rule_code = "INVALID_QUANTITY"
+
+    elif "is required" in message:
+        rule_code = "REQUIRED_FIELD"
+
+    elif "cannot be empty" in message:
+        rule_code = "EMPTY_FIELD"
+
+    elif "must be a valid iso date" in message:
+        rule_code = "INVALID_DATE"
+
+    elif "duplicate record" in message:
+        rule_code = "DUPLICATE_RECORD"
+
+    else:
+        rule_code = "VALIDATION_ERROR"
 
     return {
-        "rule_code": "VALIDATION_ERROR",
-        "severity": "ERROR",
+        "rule_code": rule_code,
+        "severity": QUALITY_RULES[rule_code]["severity"],
     }
 
 
-def validate_record(
-    record: dict[str, Any],
-) -> dict[str, Any]:
-
-    errors = []
+def validate_record(record: dict[str, Any]) -> dict[str, Any]:
+    errors: list[str] = []
 
     errors.extend(
         validate_required_fields(record)
@@ -170,16 +185,14 @@ def validate_record(
         validate_dates(record)
     )
 
-    structured_errors = []
+    rule_results = []
 
-    for error_message in errors:
-        rule = get_rule_for_error(
-            error_message
-        )
+    for error in errors:
+        rule = get_rule_for_error(error)
 
-        structured_errors.append(
+        rule_results.append(
             {
-                "message": error_message,
+                "message": error,
                 "rule_code": rule["rule_code"],
                 "severity": rule["severity"],
             }
@@ -188,31 +201,46 @@ def validate_record(
     return {
         "valid": len(errors) == 0,
         "errors": errors,
-        "rule_results": structured_errors,
+        "rule_results": rule_results,
     }
 
 
 def validate_records(
     records: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
+    duplicate_map = detect_duplicates(records)
 
     results = []
 
-    for index, record in enumerate(
+    for record_number, record in enumerate(
         records,
         start=1,
     ):
         validation = validate_record(record)
 
+        if record_number in duplicate_map:
+            duplicate_message = "Duplicate record detected."
+
+            validation["errors"].append(
+                duplicate_message
+            )
+
+            validation["rule_results"].append(
+                {
+                    "message": duplicate_message,
+                    "rule_code": "DUPLICATE_RECORD",
+                    "severity": "WARNING",
+                }
+            )
+
+            validation["valid"] = False
+
         results.append(
             {
-                "record_number": index,
-                "record": record,
+                "record_number": record_number,
                 "valid": validation["valid"],
                 "errors": validation["errors"],
-                "rule_results": validation[
-                    "rule_results"
-                ],
+                "rule_results": validation["rule_results"],
             }
         )
 
@@ -220,136 +248,102 @@ def validate_records(
 
 
 def separate_valid_and_invalid(
+    records: list[dict[str, Any]],
     validation_results: list[dict[str, Any]],
-) -> dict[str, list[dict[str, Any]]]:
-
+):
     valid_records = []
-    quarantined_records = []
+    invalid_records = []
 
-    for result in validation_results:
-
+    for record, result in zip(
+        records,
+        validation_results,
+    ):
         if result["valid"]:
-            valid_records.append(result)
-
+            valid_records.append(record)
         else:
-            quarantined_records.append(
-                {
-                    "record_number": result[
-                        "record_number"
-                    ],
-                    "record": result["record"],
-                    "errors": result["errors"],
-                    "rule_results": result[
-                        "rule_results"
-                    ],
-                    "status": "QUARANTINED",
-                }
-            )
+            invalid_records.append(record)
 
-    return {
-        "valid": valid_records,
-        "quarantined": quarantined_records,
-    }
+    return valid_records, invalid_records
 
 
 def store_validation_errors(
     db: Session,
-    ingestion_job_id: uuid.UUID,
+    ingestion_job_id,
     validation_results: list[dict[str, Any]],
-) -> list[ValidationError]:
-
-    errors = []
-
+):
     for result in validation_results:
+        row_number = result["record_number"]
 
-        if result["valid"]:
-            continue
-
-        row_number = result.get(
-            "record_number"
+        existing_errors = (
+            db.query(ValidationError)
+            .filter(
+                ValidationError.ingestion_job_id
+                == ingestion_job_id,
+                ValidationError.row_number
+                == row_number,
+            )
+            .all()
         )
 
-        record = result.get(
-            "record",
-            {},
-        )
+        existing_by_code = {
+            error.error_code: error
+            for error in existing_errors
+        }
 
-        for error_message in result["errors"]:
+        current_rule_codes = set()
 
-            rule = get_rule_for_error(
-                error_message
+        for rule in result.get(
+            "rule_results",
+            [],
+        ):
+            rule_code = rule["rule_code"]
+            current_rule_codes.add(rule_code)
+
+            error = existing_by_code.get(
+                rule_code
             )
 
-            error_code = rule["rule_code"]
-            field_name = None
+            message = rule["message"]
 
-            for field in (
-                "ITEM_CODE",
-                "ITEM_NAME",
-                "QUANTITY",
-                "LOCATION",
-                "DATE",
-                "CONSUMPTION_DATE",
-                "SHIPMENT_DATE",
-            ):
-                if field in error_message:
-                    field_name = field
-                    break
+            if error:
+                error.raw_value = None
+                error.error_message = message
+                error.status = ValidationErrorStatus.OPEN
+            else:
+                error = ValidationError(
+                    ingestion_job_id=ingestion_job_id,
+                    row_number=row_number,
+                    field_name=None,
+                    raw_value=None,
+                    error_code=rule_code,
+                    error_message=message,
+                    status=ValidationErrorStatus.OPEN,
+                )
 
+                db.add(error)
+
+        for error in existing_errors:
             if (
-                field_name is None
-                and error_code == "REQUIRED_FIELD"
+                error.error_code
+                not in current_rule_codes
             ):
-                for field in REQUIRED_FIELDS:
-                    if record.get(field) is None:
-                        field_name = field
-                        break
-
-            raw_value = None
-
-            if field_name:
-                value = record.get(field_name)
-
-                if value is not None:
-                    raw_value = json.dumps(
-                        value,
-                        default=str,
-                    )
-
-            validation_error = ValidationError(
-                ingestion_job_id=ingestion_job_id,
-                row_number=row_number,
-                field_name=field_name,
-                raw_value=raw_value,
-                error_code=error_code,
-                error_message=error_message,
-                status="OPEN",
-            )
-
-            db.add(validation_error)
-            errors.append(validation_error)
-
-    db.flush()
-
-    return errors
+                error.status = (
+                    ValidationErrorStatus.RESOLVED
+                )
 
 
 def update_staging_record_status(
-    staging_records: list[Any],
-    validation_results: list[dict[str, Any]],
-) -> None:
+    db: Session,
+    staging_record: StagingRecord,
+    valid: bool,
+):
+    if valid:
+        staging_record.status = (
+            StagingRecordStatus.PROCESSED
+        )
+        staging_record.error_message = None
 
-    for staging_record, result in zip(
-        staging_records,
-        validation_results,
-    ):
-
-        if result["valid"]:
-            staging_record.status = "PROCESSED"
-            staging_record.error_message = None
-
-        else:
-            staging_record.status = "QUARANTINED"
-            staging_record.error_message = (
-                "; ".join(result["errors"])
-            )
+    else:
+        staging_record.status = (
+            StagingRecordStatus.QUARANTINED
+        )

@@ -1,32 +1,15 @@
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import text
 
 from app.api.routes.auth import router as auth_router
 from app.api.routes.ingestion import router as ingestion_router
 from app.api.routes.management import router as management_router
 from app.api.routes.mapping_assistant import router as mapping_assistant_router
-from app.db.session import engine
+from app.api.routes.quality import router as quality_router
 
 
 app = FastAPI(
     title="Predictive Logistics API",
-    description=(
-        "Backend API for the Predictive Logistics "
-        "& Forward Supply Chain platform."
-    ),
-    version="0.1.0",
-)
-
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    version="1.0.0",
 )
 
 
@@ -34,30 +17,19 @@ app.include_router(auth_router)
 app.include_router(ingestion_router)
 app.include_router(management_router)
 app.include_router(mapping_assistant_router)
+app.include_router(quality_router)
 
 
 @app.get("/")
 def root():
     return {
         "message": "Predictive Logistics API is running",
-        "version": "0.1.0",
+        "version": "1.0.0",
     }
 
 
-@app.get("/api/health")
-def health_check():
+@app.get("/health")
+def health():
     return {
-        "status": "ok",
-        "service": "backend",
-    }
-
-
-@app.get("/api/health/database")
-def database_health_check():
-    with engine.connect() as connection:
-        connection.execute(text("SELECT 1"))
-
-    return {
-        "status": "ok",
-        "database": "postgresql",
+        "status": "healthy",
     }

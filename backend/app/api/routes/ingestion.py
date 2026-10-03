@@ -1,4 +1,5 @@
 from uuid import UUID
+from app.ingestion.lineage import create_ingestion_lineage
 from app.models.mapping_config import MappingConfig
 from app.ingestion.mapping_engine import (
     apply_mapping_to_staging_records,
@@ -10,6 +11,7 @@ from app.ingestion.validator import (
     update_staging_record_status,
     store_validation_errors,
 )
+from app.ingestion.quality import calculate_quality_score
 
 from app.ingestion.schema_detector import (
     detect_schema,
@@ -161,7 +163,10 @@ def json_safe_value(value):
         return [json_safe_value(item) for item in value]
 
     if isinstance(value, dict):
-        return {str(key): json_safe_value(item) for key, item in value.items()}
+        return {
+            str(key): json_safe_value(item)
+            for key, item in value.items()
+        }
 
     return value
 
@@ -190,7 +195,10 @@ def dataframe_to_staging_records(
     return records
 
 
-def dataframe_preview(dataframe: pd.DataFrame, limit: int = 10) -> list[dict]:
+def dataframe_preview(
+    dataframe: pd.DataFrame,
+    limit: int = 10,
+) -> list[dict]:
     """Create a JSON-safe preview from a pandas DataFrame."""
     preview = []
 
@@ -505,6 +513,7 @@ def detect_uploaded_schema(
         "conflicts": conflicts,
     }
 
+
 @router.post("/assistant")
 def data_assistant(
     source_id: UUID,
@@ -703,10 +712,6 @@ def save_detected_mapping(
             },
         )
 
-    from app.ingestion.mapping_engine import (
-        build_mapping_configuration,
-    )
-
     mapping_configuration = build_mapping_configuration(
         detection_results
     )
@@ -739,6 +744,7 @@ def save_detected_mapping(
         "is_active": mapping_config.is_active,
         "mapping_definition": mapping_config.mapping_definition,
     }
+
 
 @router.post("/validate")
 def validate_ingestion(
@@ -807,17 +813,33 @@ def validate_ingestion(
         records
     )
 
-    update_staging_record_status(
+    # Calculate overall data quality score.
+    quality_score = calculate_quality_score(
+        validation_results
+    )
+
+    for staging_record, result in zip(
         staging_records,
         validation_results,
-    )
+    ):
+        update_staging_record_status(
+            db,
+            staging_record,
+            result["valid"],
+        )
 
     store_validation_errors(
         db,
         ingestion_job_id,
         validation_results,
     )
-
+    create_ingestion_lineage(
+        db=db,
+        ingestion_job_id=ingestion_job_id,
+        staging_records=staging_records,
+        mapping_config=mapping_config,
+        validation_results=validation_results,
+    )
     db.commit()
 
     valid_count = sum(
@@ -840,5 +862,6 @@ def validate_ingestion(
         ),
         "valid_records": valid_count,
         "quarantined_records": invalid_count,
+        "quality_score": quality_score,
         "results": validation_results,
     }
