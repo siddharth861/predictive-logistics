@@ -24,6 +24,8 @@ from app.models.shipment import Shipment
 from app.models.supplier import Supplier
 from app.models.maintenance import MaintenanceRecord
 
+from app.models.logistics_event import LogisticsEvent
+
 
 __all__ = [
     "Base",
@@ -45,4 +47,5 @@ __all__ = [
     "Shipment",
     "Supplier",
     "MaintenanceRecord",
+    "LogisticsEvent",
 ]

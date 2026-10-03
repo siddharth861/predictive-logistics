@@ -18,6 +18,7 @@ from app.models import (
     Vehicle,
     Supplier,
     MaintenanceRecord,
+    LogisticsEvent,
 )
 
 router = APIRouter(prefix="/api/logistics", tags=["Logistics"])
@@ -151,6 +152,20 @@ class MaintenanceCreate(BaseModel):
 
 class MaintenanceStatusUpdate(BaseModel):
     status: str
+
+
+# ============================================================
+# EVENT SCHEMAS
+# ============================================================
+
+class LogisticsEventCreate(BaseModel):
+    event_type: str = Field(min_length=1, max_length=50)
+    severity: str = "INFO"
+    title: str = Field(min_length=1, max_length=255)
+    description: Optional[str] = None
+    location_id: Optional[str] = None
+    vehicle_id: Optional[str] = None
+    shipment_id: Optional[str] = None
 
 
 # ============================================================
@@ -1134,3 +1149,209 @@ def update_maintenance_status(maintenance_id: str, payload: MaintenanceStatusUpd
         record.completed_date = date.today()
     db.commit(); db.refresh(record)
     return {"id": str(record.id), "vehicle_id": str(record.vehicle_id), "vehicle_code": record.vehicle.vehicle_code, "maintenance_type": record.maintenance_type, "status": record.status, "scheduled_date": record.scheduled_date, "completed_date": record.completed_date, "updated_at": record.updated_at}
+
+
+# ============================================================
+# LOGISTICS EVENTS
+# ============================================================
+
+@router.post("/events")
+def create_logistics_event(
+    payload: LogisticsEventCreate,
+    db: Session = Depends(get_db),
+):
+    allowed_event_types = {
+        "LOW_STOCK",
+        "DEMAND_SPIKE",
+        "VEHICLE_FAILURE",
+        "SHIPMENT_DELAY",
+        "WEATHER_ALERT",
+        "MAINTENANCE_DUE",
+        "DATA_QUALITY",
+    }
+
+    allowed_severities = {
+        "INFO",
+        "WARNING",
+        "CRITICAL",
+    }
+
+    if payload.event_type not in allowed_event_types:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Invalid event type. "
+                f"Allowed values: {sorted(allowed_event_types)}"
+            ),
+        )
+
+    if payload.severity not in allowed_severities:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Invalid severity. "
+                f"Allowed values: {sorted(allowed_severities)}"
+            ),
+        )
+
+    if payload.location_id:
+        location = db.get(Location, payload.location_id)
+        if not location:
+            raise HTTPException(
+                status_code=404,
+                detail="Location not found",
+            )
+
+    if payload.vehicle_id:
+        vehicle = db.get(Vehicle, payload.vehicle_id)
+        if not vehicle:
+            raise HTTPException(
+                status_code=404,
+                detail="Vehicle not found",
+            )
+
+    if payload.shipment_id:
+        shipment = db.get(Shipment, payload.shipment_id)
+        if not shipment:
+            raise HTTPException(
+                status_code=404,
+                detail="Shipment not found",
+            )
+
+    event = LogisticsEvent(
+        event_type=payload.event_type,
+        severity=payload.severity,
+        title=payload.title,
+        description=payload.description,
+        location_id=payload.location_id,
+        vehicle_id=payload.vehicle_id,
+        shipment_id=payload.shipment_id,
+    )
+
+    db.add(event)
+    db.commit()
+    db.refresh(event)
+
+    return {
+        "id": str(event.id),
+        "event_type": event.event_type,
+        "severity": event.severity,
+        "title": event.title,
+        "description": event.description,
+        "location_id": (
+            str(event.location_id)
+            if event.location_id
+            else None
+        ),
+        "vehicle_id": (
+            str(event.vehicle_id)
+            if event.vehicle_id
+            else None
+        ),
+        "shipment_id": (
+            str(event.shipment_id)
+            if event.shipment_id
+            else None
+        ),
+        "is_resolved": event.is_resolved,
+        "resolved_at": event.resolved_at,
+        "created_at": event.created_at,
+    }
+
+
+@router.get("/events")
+def list_logistics_events(
+    event_type: Optional[str] = Query(default=None),
+    severity: Optional[str] = Query(default=None),
+    is_resolved: Optional[bool] = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    query = select(LogisticsEvent)
+
+    if event_type:
+        query = query.where(
+            LogisticsEvent.event_type == event_type
+        )
+
+    if severity:
+        query = query.where(
+            LogisticsEvent.severity == severity
+        )
+
+    if is_resolved is not None:
+        query = query.where(
+            LogisticsEvent.is_resolved == is_resolved
+        )
+
+    events = db.scalars(
+        query.order_by(
+            LogisticsEvent.created_at.desc()
+        )
+    ).all()
+
+    return {
+        "count": len(events),
+        "events": [
+            {
+                "id": str(event.id),
+                "event_type": event.event_type,
+                "severity": event.severity,
+                "title": event.title,
+                "description": event.description,
+                "location_id": (
+                    str(event.location_id)
+                    if event.location_id
+                    else None
+                ),
+                "vehicle_id": (
+                    str(event.vehicle_id)
+                    if event.vehicle_id
+                    else None
+                ),
+                "shipment_id": (
+                    str(event.shipment_id)
+                    if event.shipment_id
+                    else None
+                ),
+                "is_resolved": event.is_resolved,
+                "resolved_at": event.resolved_at,
+                "created_at": event.created_at,
+            }
+            for event in events
+        ],
+    }
+
+
+@router.patch("/events/{event_id}/resolve")
+def resolve_logistics_event(
+    event_id: str,
+    db: Session = Depends(get_db),
+):
+    event = db.get(
+        LogisticsEvent,
+        event_id,
+    )
+
+    if not event:
+        raise HTTPException(
+            status_code=404,
+            detail="Logistics event not found",
+        )
+
+    if not event.is_resolved:
+        event.is_resolved = True
+        event.resolved_at = datetime.now().astimezone()
+
+        db.commit()
+        db.refresh(event)
+
+    return {
+        "id": str(event.id),
+        "event_type": event.event_type,
+        "severity": event.severity,
+        "title": event.title,
+        "is_resolved": event.is_resolved,
+        "resolved_at": event.resolved_at,
+        "updated_at": event.updated_at,
+    }
+
