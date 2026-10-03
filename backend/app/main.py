@@ -5,6 +5,7 @@ from app.api.routes.ingestion import router as ingestion_router
 from app.api.routes.management import router as management_router
 from app.api.routes.mapping_assistant import router as mapping_assistant_router
 from app.api.routes.quality import router as quality_router
+from app.api.routes.logistics import router as logistics_router
 
 
 app = FastAPI(
@@ -18,6 +19,7 @@ app.include_router(ingestion_router)
 app.include_router(management_router)
 app.include_router(mapping_assistant_router)
 app.include_router(quality_router)
+app.include_router(logistics_router)
 
 
 @app.get("/")

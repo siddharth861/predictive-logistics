@@ -32,6 +32,9 @@ from app.models.route import Route
 
 from app.models.user import User, UserRole
 
+from app.models.item import Item
+from app.models.inventory import Inventory
+
 
 __all__ = [
     "Base",
@@ -54,4 +57,6 @@ __all__ = [
     "User",
     "UserRole",
     "RefreshToken",
+    "Item",
+    "Inventory",
 ]
