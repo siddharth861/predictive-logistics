@@ -6,7 +6,12 @@ from app.api.routes.gis import router as gis_router
 from app.api.routes.ingestion import router as ingestion_router
 from app.api.routes.logistics import router as logistics_router
 from app.api.routes.management import router as management_router
-from app.api.routes.mapping_assistant import router as mapping_assistant_router
+from app.api.routes.mapping_assistant import (
+    router as mapping_assistant_router,
+)
+from app.api.routes.optimization import (
+    router as optimization_router,
+)
 from app.api.routes.quality import router as quality_router
 
 
@@ -24,6 +29,7 @@ app.include_router(quality_router)
 app.include_router(logistics_router)
 app.include_router(ai_router)
 app.include_router(gis_router)
+app.include_router(optimization_router)
 
 
 @app.get("/")
