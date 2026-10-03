@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -7,10 +8,19 @@ from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
+
+from app.models.item import Item
+from app.models.inventory import Inventory
 from app.models.location import Location
 from app.models.logistics_event import LogisticsEvent
 from app.models.shipment import Shipment
 from app.models.vehicle import Vehicle
+
+from app.api.routes.ai import (
+    get_consumption_forecast,
+    get_stockout_risk,
+    get_supply_risk,
+)
 
 
 router = APIRouter(
@@ -101,6 +111,7 @@ def get_route_risk(
         warnings.append(
             "Route distance exceeds 500 km."
         )
+
     elif distance_km > 200:
         risks.append("EXTENDED_DISTANCE")
         warnings.append(
@@ -847,4 +858,567 @@ def get_operational_layer(
             "shipments": len(shipment_layers),
             "unresolved_events": len(event_layers),
         },
+    }
+
+
+@router.get("/supply-flow")
+def get_supply_flow(
+    status: str | None = Query(default=None),
+    item_id: UUID | None = Query(default=None),
+    vehicle_id: UUID | None = Query(default=None),
+    source_location_id: UUID | None = Query(default=None),
+    destination_location_id: UUID | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    query = select(Shipment).order_by(
+        Shipment.created_at.desc()
+    )
+
+    if status is not None:
+        query = query.where(
+            Shipment.status == status
+        )
+
+    if item_id is not None:
+        query = query.where(
+            Shipment.item_id == item_id
+        )
+
+    if vehicle_id is not None:
+        query = query.where(
+            Shipment.vehicle_id == vehicle_id
+        )
+
+    if source_location_id is not None:
+        query = query.where(
+            Shipment.source_location_id
+            == source_location_id
+        )
+
+    if destination_location_id is not None:
+        query = query.where(
+            Shipment.destination_location_id
+            == destination_location_id
+        )
+
+    shipments = db.scalars(query).all()
+
+    flows = []
+
+    for shipment in shipments:
+        source = db.scalar(
+            select(Location).where(
+                Location.id
+                == shipment.source_location_id
+            )
+        )
+
+        destination = db.scalar(
+            select(Location).where(
+                Location.id
+                == shipment.destination_location_id
+            )
+        )
+
+        if source is None or destination is None:
+            continue
+
+        vehicle = None
+
+        if shipment.vehicle_id is not None:
+            vehicle = db.scalar(
+                select(Vehicle).where(
+                    Vehicle.id
+                    == shipment.vehicle_id
+                )
+            )
+
+        item = db.scalar(
+            select(Item).where(
+                Item.id == shipment.item_id
+            )
+        )
+
+        source_coordinates = get_coordinates(
+            db,
+            source.id,
+        )
+
+        destination_coordinates = get_coordinates(
+            db,
+            destination.id,
+        )
+
+        distance_km = get_distance_km(
+            db,
+            source.id,
+            destination.id,
+        )
+
+        flows.append(
+            {
+                "shipment": {
+                    "id": str(shipment.id),
+                    "code": shipment.shipment_code,
+                    "status": shipment.status,
+                    "quantity": float(
+                        shipment.quantity
+                    ),
+                    "planned_departure": (
+                        shipment.planned_departure.isoformat()
+                        if shipment.planned_departure
+                        else None
+                    ),
+                    "actual_departure": (
+                        shipment.actual_departure.isoformat()
+                        if shipment.actual_departure
+                        else None
+                    ),
+                    "estimated_arrival": (
+                        shipment.estimated_arrival.isoformat()
+                        if shipment.estimated_arrival
+                        else None
+                    ),
+                    "actual_arrival": (
+                        shipment.actual_arrival.isoformat()
+                        if shipment.actual_arrival
+                        else None
+                    ),
+                },
+                "item": (
+                    {
+                        "id": str(item.id),
+                        "code": item.item_code,
+                        "name": item.name,
+                        "category": item.category,
+                        "unit": item.unit,
+                    }
+                    if item
+                    else {
+                        "id": str(
+                            shipment.item_id
+                        )
+                    }
+                ),
+                "source": {
+                    "id": str(source.id),
+                    "code": source.code,
+                    "name": source.name,
+                    "location_type": source.location_type,
+                    "coordinates": source_coordinates,
+                },
+                "destination": {
+                    "id": str(destination.id),
+                    "code": destination.code,
+                    "name": destination.name,
+                    "location_type": destination.location_type,
+                    "coordinates": destination_coordinates,
+                },
+                "vehicle": (
+                    {
+                        "id": str(vehicle.id),
+                        "code": vehicle.vehicle_code,
+                        "type": vehicle.vehicle_type,
+                        "status": vehicle.status,
+                        "capacity": (
+                            float(vehicle.capacity)
+                            if vehicle.capacity
+                            is not None
+                            else None
+                        ),
+                        "capacity_unit": (
+                            vehicle.capacity_unit
+                        ),
+                    }
+                    if vehicle
+                    else None
+                ),
+                "route": {
+                    "distance_km": (
+                        round(
+                            distance_km,
+                            3,
+                        )
+                        if distance_km is not None
+                        else None
+                    ),
+                },
+            }
+        )
+
+    return {
+        "count": len(flows),
+        "flows": flows,
+    }
+
+
+@router.get("/operational-intelligence")
+def get_operational_intelligence(
+    item_id: UUID | None = Query(default=None),
+    location_id: UUID | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    """
+    Combine GIS operational context with AI logistics intelligence.
+
+    When item_id and location_id are supplied, the endpoint returns
+    intelligence for that specific item/location pair.
+
+    When they are omitted, the endpoint discovers item/location pairs
+    from the current inventory table.
+    """
+
+    # ------------------------------------------------------------
+    # Determine item/location pairs
+    # ------------------------------------------------------------
+
+    pairs = []
+
+    if item_id is not None and location_id is not None:
+        pairs.append(
+            {
+                "item_id": item_id,
+                "location_id": location_id,
+            }
+        )
+
+    elif item_id is not None:
+        inventories = db.scalars(
+            select(Inventory).where(
+                Inventory.item_id == item_id
+            )
+        ).all()
+
+        for inventory in inventories:
+            pairs.append(
+                {
+                    "item_id": inventory.item_id,
+                    "location_id": inventory.location_id,
+                }
+            )
+
+    elif location_id is not None:
+        inventories = db.scalars(
+            select(Inventory).where(
+                Inventory.location_id
+                == location_id
+            )
+        ).all()
+
+        for inventory in inventories:
+            pairs.append(
+                {
+                    "item_id": inventory.item_id,
+                    "location_id": inventory.location_id,
+                }
+            )
+
+    else:
+        inventories = db.scalars(
+            select(Inventory)
+            .order_by(
+                Inventory.updated_at.desc()
+            )
+        ).all()
+
+        seen = set()
+
+        for inventory in inventories:
+            pair_key = (
+                str(inventory.item_id),
+                str(inventory.location_id),
+            )
+
+            if pair_key in seen:
+                continue
+
+            seen.add(pair_key)
+
+            pairs.append(
+                {
+                    "item_id": inventory.item_id,
+                    "location_id": inventory.location_id,
+                }
+            )
+
+    # ------------------------------------------------------------
+    # Build intelligence records
+    # ------------------------------------------------------------
+
+    intelligence = []
+
+    for pair in pairs:
+
+        current_item_id = pair["item_id"]
+        current_location_id = pair["location_id"]
+
+        item = db.scalar(
+            select(Item).where(
+                Item.id == current_item_id
+            )
+        )
+
+        location = db.scalar(
+            select(Location).where(
+                Location.id == current_location_id
+            )
+        )
+
+        inventory = db.scalar(
+            select(Inventory).where(
+                Inventory.item_id
+                == current_item_id,
+                Inventory.location_id
+                == current_location_id,
+            )
+        )
+
+        if item is None or location is None:
+            continue
+
+        # --------------------------------------------------------
+        # AI predictions
+        # --------------------------------------------------------
+
+        try:
+            forecast = get_consumption_forecast(
+                current_item_id,
+                current_location_id,
+                db,
+            )
+
+            stockout = get_stockout_risk(
+                current_item_id,
+                current_location_id,
+                db,
+            )
+
+            supply_risk = get_supply_risk(
+                current_item_id,
+                current_location_id,
+                db,
+            )
+
+        except HTTPException as exc:
+            # A location/item pair may exist in inventory but
+            # not have enough historical consumption data yet.
+            intelligence.append(
+                {
+                    "item": {
+                        "id": str(item.id),
+                        "code": item.item_code,
+                        "name": item.name,
+                        "category": item.category,
+                        "unit": item.unit,
+                    },
+                    "location": {
+                        "id": str(location.id),
+                        "code": location.code,
+                        "name": location.name,
+                        "location_type": location.location_type,
+                        "coordinates": get_coordinates(
+                            db,
+                            location.id,
+                        ),
+                    },
+                    "inventory": (
+                        {
+                            "quantity": float(
+                                inventory.quantity
+                            ),
+                            "minimum_stock": float(
+                                inventory.minimum_stock
+                            ),
+                            "maximum_stock": (
+                                float(
+                                    inventory.maximum_stock
+                                )
+                                if inventory.maximum_stock
+                                is not None
+                                else None
+                            ),
+                        }
+                        if inventory
+                        else None
+                    ),
+                    "ai": {
+                        "available": False,
+                        "error": str(exc.detail),
+                    },
+                }
+            )
+
+            continue
+
+        # --------------------------------------------------------
+        # GIS supply-flow context
+        # --------------------------------------------------------
+
+        related_shipments = db.scalars(
+            select(Shipment)
+            .where(
+                (
+                    Shipment.source_location_id
+                    == current_location_id
+                )
+                |
+                (
+                    Shipment.destination_location_id
+                    == current_location_id
+                )
+            )
+            .order_by(
+                Shipment.created_at.desc()
+            )
+        ).all()
+
+        shipment_layers = []
+
+        for shipment in related_shipments:
+
+            source = db.scalar(
+                select(Location).where(
+                    Location.id
+                    == shipment.source_location_id
+                )
+            )
+
+            destination = db.scalar(
+                select(Location).where(
+                    Location.id
+                    == shipment.destination_location_id
+                )
+            )
+
+            if source is None or destination is None:
+                continue
+
+            distance_km = get_distance_km(
+                db,
+                source.id,
+                destination.id,
+            )
+
+            vehicle = None
+
+            if shipment.vehicle_id is not None:
+                vehicle = db.scalar(
+                    select(Vehicle).where(
+                        Vehicle.id
+                        == shipment.vehicle_id
+                    )
+                )
+
+            shipment_layers.append(
+                {
+                    "id": str(shipment.id),
+                    "code": shipment.shipment_code,
+                    "status": shipment.status,
+                    "quantity": float(
+                        shipment.quantity
+                    ),
+                    "source": {
+                        "id": str(source.id),
+                        "code": source.code,
+                        "name": source.name,
+                        "coordinates": get_coordinates(
+                            db,
+                            source.id,
+                        ),
+                    },
+                    "destination": {
+                        "id": str(destination.id),
+                        "code": destination.code,
+                        "name": destination.name,
+                        "coordinates": get_coordinates(
+                            db,
+                            destination.id,
+                        ),
+                    },
+                    "vehicle": (
+                        {
+                            "id": str(vehicle.id),
+                            "code": vehicle.vehicle_code,
+                            "status": vehicle.status,
+                        }
+                        if vehicle
+                        else None
+                    ),
+                    "route": {
+                        "distance_km": (
+                            round(
+                                distance_km,
+                                3,
+                            )
+                            if distance_km is not None
+                            else None
+                        ),
+                    },
+                }
+            )
+
+        # --------------------------------------------------------
+        # Final integrated record
+        # --------------------------------------------------------
+
+        intelligence.append(
+            {
+                "item": {
+                    "id": str(item.id),
+                    "code": item.item_code,
+                    "name": item.name,
+                    "category": item.category,
+                    "unit": item.unit,
+                },
+                "location": {
+                    "id": str(location.id),
+                    "code": location.code,
+                    "name": location.name,
+                    "location_type": location.location_type,
+                    "coordinates": get_coordinates(
+                        db,
+                        location.id,
+                    ),
+                },
+                "inventory": (
+                    {
+                        "quantity": float(
+                            inventory.quantity
+                        ),
+                        "minimum_stock": float(
+                            inventory.minimum_stock
+                        ),
+                        "maximum_stock": (
+                            float(
+                                inventory.maximum_stock
+                            )
+                            if inventory.maximum_stock
+                            is not None
+                            else None
+                        ),
+                    }
+                    if inventory
+                    else None
+                ),
+                "ai": {
+                    "available": True,
+                    "forecast": forecast,
+                    "stockout": stockout,
+                    "supply_risk": supply_risk,
+                },
+                "gis": {
+                    "related_shipments": shipment_layers,
+                    "related_shipment_count": len(
+                        shipment_layers
+                    ),
+                },
+            }
+        )
+
+    return {
+        "generated_at": datetime.now(
+            timezone.utc
+        ).isoformat(),
+        "count": len(intelligence),
+        "intelligence": intelligence,
     }
