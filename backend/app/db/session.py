@@ -9,13 +9,24 @@ DATABASE_URL = os.getenv(
     "postgresql+psycopg://logistics_user:logistics_dev_password@postgres:5432/logistics",
 )
 
+
 engine = create_engine(
     DATABASE_URL,
     pool_pre_ping=True,
 )
+
 
 SessionLocal = sessionmaker(
     bind=engine,
     autoflush=False,
     autocommit=False,
 )
+
+
+def get_db():
+    db = SessionLocal()
+
+    try:
+        yield db
+    finally:
+        db.close()

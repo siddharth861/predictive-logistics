@@ -1,94 +1,149 @@
-from uuid import UUID
+from datetime import date
+from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
-from geoalchemy2.elements import WKTElement
-from sqlalchemy.exc import IntegrityError
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db.dependencies import get_db
-from app.models.inventory import Inventory
-from app.models.item import Item
-from app.models.location import Location
-
-
-router = APIRouter(
-    prefix="/api/logistics",
-    tags=["Logistics"],
+from app.db.session import get_db
+from app.models import (
+    ConsumptionRecord,
+    DataSource,
+    DemandRecord,
+    Inventory,
+    Item,
+    Location,
+    Vehicle,
 )
 
+router = APIRouter(prefix="/api/logistics", tags=["Logistics"])
 
-# -------------------------------------------------------------------
+
+# ============================================================
+# LOCATION SCHEMAS
+# ============================================================
+
+class LocationCreate(BaseModel):
+    code: str = Field(min_length=1, max_length=100)
+    name: str = Field(min_length=1, max_length=255)
+    location_type: str = Field(min_length=1, max_length=100)
+    latitude: float
+    longitude: float
+    description: Optional[str] = None
+
+
+# ============================================================
+# ITEM SCHEMAS
+# ============================================================
+
+class ItemCreate(BaseModel):
+    item_code: str = Field(min_length=1, max_length=100)
+    name: str = Field(min_length=1, max_length=255)
+    category: Optional[str] = None
+    unit: str = "UNIT"
+    description: Optional[str] = None
+
+
+# ============================================================
+# INVENTORY SCHEMAS
+# ============================================================
+
+class InventoryCreate(BaseModel):
+    item_id: str
+    location_id: str
+    quantity: float = Field(ge=0)
+    minimum_stock: float = Field(default=0, ge=0)
+    maximum_stock: Optional[float] = Field(default=None, ge=0)
+
+
+# ============================================================
+# CONSUMPTION SCHEMAS
+# ============================================================
+
+class ConsumptionCreate(BaseModel):
+    item_id: str
+    location_id: str
+    consumption_date: date
+    quantity: float = Field(ge=0)
+    source_id: Optional[str] = None
+
+
+# ============================================================
+# DEMAND SCHEMAS
+# ============================================================
+
+class DemandCreate(BaseModel):
+    item_id: str
+    location_id: str
+    demand_date: date
+    quantity: float = Field(ge=0)
+    source_id: Optional[str] = None
+
+
+# ============================================================
+# VEHICLE SCHEMAS
+# ============================================================
+
+class VehicleCreate(BaseModel):
+    vehicle_code: str = Field(min_length=1, max_length=100)
+    vehicle_type: str = Field(min_length=1, max_length=100)
+    capacity: float = Field(gt=0)
+    capacity_unit: str = Field(default="UNIT", min_length=1, max_length=50)
+    current_location_id: Optional[str] = None
+    status: str = "AVAILABLE"
+
+
+# ============================================================
 # LOCATIONS
-# -------------------------------------------------------------------
+# ============================================================
 
 @router.post("/locations")
 def create_location(
-    code: str,
-    name: str,
-    location_type: str,
-    latitude: float,
-    longitude: float,
-    description: str | None = None,
+    payload: LocationCreate,
     db: Session = Depends(get_db),
 ):
-    if not -90 <= latitude <= 90:
-        raise HTTPException(
-            status_code=400,
-            detail="Latitude must be between -90 and 90.",
-        )
+    if not (-90 <= payload.latitude <= 90):
+        raise HTTPException(status_code=400, detail="Invalid latitude")
 
-    if not -180 <= longitude <= 180:
-        raise HTTPException(
-            status_code=400,
-            detail="Longitude must be between -180 and 180.",
-        )
+    if not (-180 <= payload.longitude <= 180):
+        raise HTTPException(status_code=400, detail="Invalid longitude")
 
-    existing_location = (
-        db.query(Location)
-        .filter(Location.code == code)
-        .first()
+    existing = db.scalar(
+        select(Location).where(Location.code == payload.code)
     )
 
-    if existing_location:
+    if existing:
         raise HTTPException(
             status_code=409,
-            detail="Location code already exists.",
+            detail="Location code already exists",
         )
 
+    from geoalchemy2.elements import WKTElement
+
     location = Location(
-        code=code,
-        name=name,
-        description=description,
-        location_type=location_type,
-        geometry=WKTElement(
-            f"POINT({longitude} {latitude})",
+        code=payload.code,
+        name=payload.name,
+        location_type=payload.location_type,
+        description=payload.description,
+        geom=WKTElement(
+            f"POINT({payload.longitude} {payload.latitude})",
             srid=4326,
         ),
-        is_active=True,
     )
 
     db.add(location)
-
-    try:
-        db.commit()
-        db.refresh(location)
-    except IntegrityError:
-        db.rollback()
-        raise HTTPException(
-            status_code=409,
-            detail="Location code already exists.",
-        )
+    db.commit()
+    db.refresh(location)
 
     return {
         "id": str(location.id),
         "code": location.code,
         "name": location.name,
-        "description": location.description,
         "location_type": location.location_type,
-        "latitude": latitude,
-        "longitude": longitude,
+        "description": location.description,
         "is_active": location.is_active,
-        "created_at": location.created_at.isoformat(),
+        "created_at": location.created_at,
     }
 
 
@@ -96,11 +151,9 @@ def create_location(
 def list_locations(
     db: Session = Depends(get_db),
 ):
-    locations = (
-        db.query(Location)
-        .order_by(Location.created_at.desc())
-        .all()
-    )
+    locations = db.scalars(
+        select(Location).order_by(Location.code)
+    ).all()
 
     return {
         "count": len(locations),
@@ -112,58 +165,43 @@ def list_locations(
                 "description": location.description,
                 "location_type": location.location_type,
                 "is_active": location.is_active,
-                "created_at": location.created_at.isoformat(),
+                "created_at": location.created_at,
             }
             for location in locations
         ],
     }
 
 
-# -------------------------------------------------------------------
+# ============================================================
 # ITEMS
-# -------------------------------------------------------------------
+# ============================================================
 
 @router.post("/items")
 def create_item(
-    item_code: str,
-    name: str,
-    category: str | None = None,
-    unit: str = "UNIT",
-    description: str | None = None,
+    payload: ItemCreate,
     db: Session = Depends(get_db),
 ):
-    existing_item = (
-        db.query(Item)
-        .filter(Item.item_code == item_code)
-        .first()
+    existing = db.scalar(
+        select(Item).where(Item.item_code == payload.item_code)
     )
 
-    if existing_item:
+    if existing:
         raise HTTPException(
             status_code=409,
-            detail="Item code already exists.",
+            detail="Item code already exists",
         )
 
     item = Item(
-        item_code=item_code,
-        name=name,
-        category=category,
-        unit=unit,
-        description=description,
-        is_active=True,
+        item_code=payload.item_code,
+        name=payload.name,
+        category=payload.category,
+        unit=payload.unit,
+        description=payload.description,
     )
 
     db.add(item)
-
-    try:
-        db.commit()
-        db.refresh(item)
-    except IntegrityError:
-        db.rollback()
-        raise HTTPException(
-            status_code=409,
-            detail="Item code already exists.",
-        )
+    db.commit()
+    db.refresh(item)
 
     return {
         "id": str(item.id),
@@ -173,7 +211,7 @@ def create_item(
         "unit": item.unit,
         "description": item.description,
         "is_active": item.is_active,
-        "created_at": item.created_at.isoformat(),
+        "created_at": item.created_at,
     }
 
 
@@ -181,11 +219,9 @@ def create_item(
 def list_items(
     db: Session = Depends(get_db),
 ):
-    items = (
-        db.query(Item)
-        .order_by(Item.created_at.desc())
-        .all()
-    )
+    items = db.scalars(
+        select(Item).order_by(Item.item_code)
+    ).all()
 
     return {
         "count": len(items),
@@ -198,115 +234,69 @@ def list_items(
                 "unit": item.unit,
                 "description": item.description,
                 "is_active": item.is_active,
-                "created_at": item.created_at.isoformat(),
+                "created_at": item.created_at,
             }
             for item in items
         ],
     }
 
 
-# -------------------------------------------------------------------
+# ============================================================
 # INVENTORY
-# -------------------------------------------------------------------
+# ============================================================
 
 @router.post("/inventory")
 def create_inventory(
-    item_id: UUID,
-    location_id: UUID,
-    quantity: float,
-    minimum_stock: float = 0,
-    maximum_stock: float | None = None,
+    payload: InventoryCreate,
     db: Session = Depends(get_db),
 ):
-    item = (
-        db.query(Item)
-        .filter(Item.id == item_id)
-        .first()
-    )
-
+    item = db.get(Item, payload.item_id)
     if not item:
-        raise HTTPException(
-            status_code=404,
-            detail="Item not found.",
-        )
+        raise HTTPException(status_code=404, detail="Item not found")
 
-    location = (
-        db.query(Location)
-        .filter(Location.id == location_id)
-        .first()
-    )
-
+    location = db.get(Location, payload.location_id)
     if not location:
-        raise HTTPException(
-            status_code=404,
-            detail="Location not found.",
-        )
+        raise HTTPException(status_code=404, detail="Location not found")
 
     if not location.is_active:
         raise HTTPException(
             status_code=400,
-            detail="Location is inactive.",
+            detail="Location is inactive",
         )
 
-    if quantity < 0:
+    if (
+        payload.maximum_stock is not None
+        and payload.maximum_stock < payload.minimum_stock
+    ):
         raise HTTPException(
             status_code=400,
-            detail="Quantity cannot be negative.",
+            detail="maximum_stock cannot be less than minimum_stock",
         )
 
-    if minimum_stock < 0:
-        raise HTTPException(
-            status_code=400,
-            detail="Minimum stock cannot be negative.",
+    existing = db.scalar(
+        select(Inventory).where(
+            Inventory.item_id == payload.item_id,
+            Inventory.location_id == payload.location_id,
         )
-
-    if maximum_stock is not None:
-        if maximum_stock < 0:
-            raise HTTPException(
-                status_code=400,
-                detail="Maximum stock cannot be negative.",
-            )
-
-        if maximum_stock < minimum_stock:
-            raise HTTPException(
-                status_code=400,
-                detail="Maximum stock cannot be less than minimum stock.",
-            )
-
-    existing_inventory = (
-        db.query(Inventory)
-        .filter(
-            Inventory.item_id == item_id,
-            Inventory.location_id == location_id,
-        )
-        .first()
     )
 
-    if existing_inventory:
+    if existing:
         raise HTTPException(
             status_code=409,
-            detail="Inventory record already exists for this item and location.",
+            detail="Inventory record already exists for this item and location",
         )
 
     inventory = Inventory(
-        item_id=item_id,
-        location_id=location_id,
-        quantity=quantity,
-        minimum_stock=minimum_stock,
-        maximum_stock=maximum_stock,
+        item_id=payload.item_id,
+        location_id=payload.location_id,
+        quantity=payload.quantity,
+        minimum_stock=payload.minimum_stock,
+        maximum_stock=payload.maximum_stock,
     )
 
     db.add(inventory)
-
-    try:
-        db.commit()
-        db.refresh(inventory)
-    except IntegrityError:
-        db.rollback()
-        raise HTTPException(
-            status_code=409,
-            detail="Inventory record already exists for this item and location.",
-        )
+    db.commit()
+    db.refresh(inventory)
 
     return {
         "id": str(inventory.id),
@@ -315,7 +305,7 @@ def create_inventory(
         "quantity": inventory.quantity,
         "minimum_stock": inventory.minimum_stock,
         "maximum_stock": inventory.maximum_stock,
-        "created_at": inventory.created_at.isoformat(),
+        "created_at": inventory.created_at,
     }
 
 
@@ -323,14 +313,13 @@ def create_inventory(
 def list_inventory(
     db: Session = Depends(get_db),
 ):
-    inventory_records = (
-        db.query(Inventory)
+    records = db.scalars(
+        select(Inventory)
         .order_by(Inventory.created_at.desc())
-        .all()
-    )
+    ).all()
 
     return {
-        "count": len(inventory_records),
+        "count": len(records),
         "inventory": [
             {
                 "id": str(record.id),
@@ -343,9 +332,347 @@ def list_inventory(
                 "quantity": record.quantity,
                 "minimum_stock": record.minimum_stock,
                 "maximum_stock": record.maximum_stock,
-                "created_at": record.created_at.isoformat(),
-                "updated_at": record.updated_at.isoformat(),
+                "created_at": record.created_at,
             }
-            for record in inventory_records
+            for record in records
+        ],
+    }
+
+
+# ============================================================
+# CONSUMPTION
+# ============================================================
+
+@router.post("/consumption")
+def create_consumption(
+    payload: ConsumptionCreate,
+    db: Session = Depends(get_db),
+):
+    item = db.get(Item, payload.item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Item not found")
+
+    location = db.get(Location, payload.location_id)
+    if not location:
+        raise HTTPException(status_code=404, detail="Location not found")
+
+    source = None
+
+    if payload.source_id:
+        source = db.get(DataSource, payload.source_id)
+
+        if not source:
+            raise HTTPException(
+                status_code=404,
+                detail="Data source not found",
+            )
+
+    record = ConsumptionRecord(
+        item_id=payload.item_id,
+        location_id=payload.location_id,
+        consumption_date=payload.consumption_date,
+        quantity=payload.quantity,
+        source_id=payload.source_id,
+    )
+
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+
+    return {
+        "id": str(record.id),
+        "item_code": item.item_code,
+        "item_name": item.name,
+        "location_code": location.code,
+        "location_name": location.name,
+        "consumption_date": record.consumption_date,
+        "quantity": record.quantity,
+        "source_id": str(record.source_id) if record.source_id else None,
+        "created_at": record.created_at,
+    }
+
+
+@router.get("/consumption")
+def list_consumption(
+    item_id: Optional[str] = None,
+    location_id: Optional[str] = None,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    db: Session = Depends(get_db),
+):
+    query = select(ConsumptionRecord)
+
+    if item_id:
+        query = query.where(
+            ConsumptionRecord.item_id == item_id
+        )
+
+    if location_id:
+        query = query.where(
+            ConsumptionRecord.location_id == location_id
+        )
+
+    if start_date:
+        query = query.where(
+            ConsumptionRecord.consumption_date >= start_date
+        )
+
+    if end_date:
+        query = query.where(
+            ConsumptionRecord.consumption_date <= end_date
+        )
+
+    records = db.scalars(
+        query.order_by(ConsumptionRecord.consumption_date.desc())
+    ).all()
+
+    return {
+        "count": len(records),
+        "consumption": [
+            {
+                "id": str(record.id),
+                "item_code": record.item.item_code,
+                "item_name": record.item.name,
+                "location_code": record.location.code,
+                "location_name": record.location.name,
+                "consumption_date": record.consumption_date,
+                "quantity": record.quantity,
+                "source_id": str(record.source_id)
+                if record.source_id
+                else None,
+                "created_at": record.created_at,
+            }
+            for record in records
+        ],
+    }
+
+
+# ============================================================
+# DEMAND
+# ============================================================
+
+@router.post("/demand")
+def create_demand(
+    payload: DemandCreate,
+    db: Session = Depends(get_db),
+):
+    item = db.get(Item, payload.item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Item not found")
+
+    location = db.get(Location, payload.location_id)
+    if not location:
+        raise HTTPException(status_code=404, detail="Location not found")
+
+    if payload.source_id:
+        source = db.get(DataSource, payload.source_id)
+
+        if not source:
+            raise HTTPException(
+                status_code=404,
+                detail="Data source not found",
+            )
+
+    record = DemandRecord(
+        item_id=payload.item_id,
+        location_id=payload.location_id,
+        demand_date=payload.demand_date,
+        quantity=payload.quantity,
+        source_id=payload.source_id,
+    )
+
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+
+    return {
+        "id": str(record.id),
+        "item_code": item.item_code,
+        "item_name": item.name,
+        "location_code": location.code,
+        "location_name": location.name,
+        "demand_date": record.demand_date,
+        "quantity": record.quantity,
+        "source_id": str(record.source_id) if record.source_id else None,
+        "created_at": record.created_at,
+    }
+
+
+@router.get("/demand")
+def list_demand(
+    item_id: Optional[str] = None,
+    location_id: Optional[str] = None,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    db: Session = Depends(get_db),
+):
+    query = select(DemandRecord)
+
+    if item_id:
+        query = query.where(
+            DemandRecord.item_id == item_id
+        )
+
+    if location_id:
+        query = query.where(
+            DemandRecord.location_id == location_id
+        )
+
+    if start_date:
+        query = query.where(
+            DemandRecord.demand_date >= start_date
+        )
+
+    if end_date:
+        query = query.where(
+            DemandRecord.demand_date <= end_date
+        )
+
+    records = db.scalars(
+        query.order_by(DemandRecord.demand_date.desc())
+    ).all()
+
+    return {
+        "count": len(records),
+        "demand": [
+            {
+                "id": str(record.id),
+                "item_code": record.item.item_code,
+                "item_name": record.item.name,
+                "location_code": record.location.code,
+                "location_name": record.location.name,
+                "demand_date": record.demand_date,
+                "quantity": record.quantity,
+                "source_id": str(record.source_id)
+                if record.source_id
+                else None,
+                "created_at": record.created_at,
+            }
+            for record in records
+        ],
+    }
+
+
+# ============================================================
+# VEHICLES
+# ============================================================
+
+@router.post("/vehicles")
+def create_vehicle(
+    payload: VehicleCreate,
+    db: Session = Depends(get_db),
+):
+    existing = db.scalar(
+        select(Vehicle).where(
+            Vehicle.vehicle_code == payload.vehicle_code
+        )
+    )
+
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail="Vehicle code already exists",
+        )
+
+    allowed_statuses = {
+        "AVAILABLE",
+        "IN_TRANSIT",
+        "MAINTENANCE",
+        "UNAVAILABLE",
+    }
+
+    if payload.status not in allowed_statuses:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid status. Allowed values: {sorted(allowed_statuses)}",
+        )
+
+    location = None
+
+    if payload.current_location_id:
+        location = db.get(
+            Location,
+            payload.current_location_id,
+        )
+
+        if not location:
+            raise HTTPException(
+                status_code=404,
+                detail="Current location not found",
+            )
+
+    vehicle = Vehicle(
+        vehicle_code=payload.vehicle_code,
+        vehicle_type=payload.vehicle_type,
+        capacity=payload.capacity,
+        capacity_unit=payload.capacity_unit,
+        current_location_id=payload.current_location_id,
+        status=payload.status,
+    )
+
+    db.add(vehicle)
+    db.commit()
+    db.refresh(vehicle)
+
+    return {
+        "id": str(vehicle.id),
+        "vehicle_code": vehicle.vehicle_code,
+        "vehicle_type": vehicle.vehicle_type,
+        "capacity": vehicle.capacity,
+        "capacity_unit": vehicle.capacity_unit,
+        "current_location_id": (
+            str(vehicle.current_location_id)
+            if vehicle.current_location_id
+            else None
+        ),
+        "current_location": (
+            location.code
+            if location
+            else None
+        ),
+        "status": vehicle.status,
+        "is_active": vehicle.is_active,
+        "created_at": vehicle.created_at,
+    }
+
+
+@router.get("/vehicles")
+def list_vehicles(
+    status: Optional[str] = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    query = select(Vehicle)
+
+    if status:
+        query = query.where(Vehicle.status == status)
+
+    vehicles = db.scalars(
+        query.order_by(Vehicle.vehicle_code)
+    ).all()
+
+    return {
+        "count": len(vehicles),
+        "vehicles": [
+            {
+                "id": str(vehicle.id),
+                "vehicle_code": vehicle.vehicle_code,
+                "vehicle_type": vehicle.vehicle_type,
+                "capacity": vehicle.capacity,
+                "capacity_unit": vehicle.capacity_unit,
+                "current_location_id": (
+                    str(vehicle.current_location_id)
+                    if vehicle.current_location_id
+                    else None
+                ),
+                "current_location": (
+                    vehicle.current_location.code
+                    if vehicle.current_location
+                    else None
+                ),
+                "status": vehicle.status,
+                "is_active": vehicle.is_active,
+                "created_at": vehicle.created_at,
+            }
+            for vehicle in vehicles
         ],
     }
