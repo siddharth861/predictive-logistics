@@ -7,6 +7,7 @@ from app.optimization.models import (
     OptimizationConstraint,
     OptimizationInput,
     OptimizationResult,
+    RouteConstraint,
     SupplyDestination,
     VehicleOption,
 )
@@ -84,17 +85,7 @@ def calculate_recommended_quantity(
 def calculate_destination_need(
     destination: SupplyDestination,
 ) -> tuple[float, float, float, float]:
-    """
-    Calculate the demand-driven resupply requirement for one
-    destination.
-    """
-
-    (
-        requested_quantity,
-        expected_consumption,
-        safety_buffer_quantity,
-        target_stock,
-    ) = calculate_recommended_quantity(
+    return calculate_recommended_quantity(
         current_stock=destination.current_stock,
         minimum_stock=destination.minimum_stock,
         maximum_stock=destination.maximum_stock,
@@ -105,32 +96,137 @@ def calculate_destination_need(
         safety_buffer_days=destination.safety_buffer_days,
     )
 
-    return (
-        requested_quantity,
-        expected_consumption,
-        safety_buffer_quantity,
-        target_stock,
+
+def evaluate_route_constraints(
+    destination: SupplyDestination,
+    optimization_input: OptimizationInput,
+) -> list[RouteConstraint]:
+    constraints: list[RouteConstraint] = []
+
+    if not destination.route_available:
+        constraints.append(
+            RouteConstraint(
+                code="ROUTE_UNAVAILABLE",
+                passed=False,
+                message=(
+                    f"Route to {destination.destination_code} "
+                    "is currently unavailable."
+                ),
+                severity="HIGH",
+            )
+        )
+    else:
+        constraints.append(
+            RouteConstraint(
+                code="ROUTE_AVAILABLE",
+                passed=True,
+                message=(
+                    f"Route to {destination.destination_code} "
+                    "is available."
+                ),
+                severity="INFO",
+            )
+        )
+
+    if (
+        optimization_input.max_route_distance_km is not None
+        and destination.distance_from_source_km is not None
+    ):
+        passed = (
+            destination.distance_from_source_km
+            <= optimization_input.max_route_distance_km
+        )
+
+        constraints.append(
+            RouteConstraint(
+                code="MAX_ROUTE_DISTANCE",
+                passed=passed,
+                message=(
+                    f"Route distance is "
+                    f"{destination.distance_from_source_km:.3f} km; "
+                    f"maximum allowed is "
+                    f"{optimization_input.max_route_distance_km:.3f} km."
+                ),
+                severity="HIGH" if not passed else "INFO",
+            )
+        )
+
+    if (
+        optimization_input.max_travel_hours is not None
+        and destination.estimated_travel_hours is not None
+    ):
+        passed = (
+            destination.estimated_travel_hours
+            <= optimization_input.max_travel_hours
+        )
+
+        constraints.append(
+            RouteConstraint(
+                code="MAX_TRAVEL_TIME",
+                passed=passed,
+                message=(
+                    f"Estimated travel time is "
+                    f"{destination.estimated_travel_hours:.2f} hours; "
+                    f"maximum allowed is "
+                    f"{optimization_input.max_travel_hours:.2f} hours."
+                ),
+                severity="HIGH" if not passed else "INFO",
+            )
+        )
+
+    blocked_risk_levels = {
+        level.upper()
+        for level in optimization_input.blocked_route_risk_levels
+    }
+
+    risk_level = destination.route_risk_level.upper()
+
+    if blocked_risk_levels:
+        passed = risk_level not in blocked_risk_levels
+
+        constraints.append(
+            RouteConstraint(
+                code="ROUTE_RISK",
+                passed=passed,
+                message=(
+                    f"Route risk level is {risk_level}; "
+                    f"blocked levels are "
+                    f"{', '.join(sorted(blocked_risk_levels))}."
+                ),
+                severity="HIGH" if not passed else "INFO",
+            )
+        )
+
+    return constraints
+
+
+def is_route_feasible(
+    destination: SupplyDestination,
+    optimization_input: OptimizationInput,
+) -> tuple[bool, list[RouteConstraint]]:
+    route_constraints = evaluate_route_constraints(
+        destination,
+        optimization_input,
     )
+
+    feasible = all(
+        constraint.passed
+        for constraint in route_constraints
+    )
+
+    return feasible, route_constraints
 
 
 def allocate_supply(
     available_supply: float,
     destinations: list[SupplyDestination],
-) -> list[AllocationResult]:
-    """
-    Allocate available supply across multiple destinations.
-
-    Priority:
-    1. Higher requested quantity first.
-    2. If equal, preserve the original destination order.
-
-    This is a deterministic prototype allocation strategy.
-    """
-
+    optimization_input: Optional[OptimizationInput] = None,
+) -> tuple[list[AllocationResult], list[RouteConstraint]]:
     if available_supply < 0:
         raise ValueError("Available supply cannot be negative.")
 
     requests = []
+    route_constraints: list[RouteConstraint] = []
 
     for index, destination in enumerate(destinations):
         (
@@ -140,23 +236,80 @@ def allocate_supply(
             _target_stock,
         ) = calculate_destination_need(destination)
 
+        if optimization_input is not None:
+            route_feasible, destination_constraints = (
+                is_route_feasible(
+                    destination,
+                    optimization_input,
+                )
+            )
+
+            route_constraints.extend(
+                destination_constraints
+            )
+        else:
+            route_feasible = True
+
         requests.append(
             (
                 index,
                 destination,
                 requested_quantity,
+                route_feasible,
             )
         )
 
     requests.sort(
-        key=lambda entry: entry[2],
-        reverse=True,
+        key=lambda entry: (
+            not entry[3],
+            -entry[2],
+            entry[0],
+        )
     )
 
     remaining_supply = available_supply
     results: list[AllocationResult] = []
 
-    for _index, destination, requested_quantity in requests:
+    for (
+        _index,
+        destination,
+        requested_quantity,
+        route_feasible,
+    ) in requests:
+
+        if not route_feasible:
+            results.append(
+                AllocationResult(
+                    destination_id=destination.destination_id,
+                    destination_code=destination.destination_code,
+                    requested_quantity=round(
+                        requested_quantity,
+                        2,
+                    ),
+                    allocated_quantity=0.0,
+                    remaining_need=round(
+                        requested_quantity,
+                        2,
+                    ),
+                    feasible=False,
+                    explanation=(
+                        f"No supply allocated to "
+                        f"{destination.destination_code} "
+                        "because its route is not feasible."
+                    ),
+                    route_distance_km=(
+                        destination.distance_from_source_km
+                    ),
+                    estimated_travel_hours=(
+                        destination.estimated_travel_hours
+                    ),
+                    route_risk_level=(
+                        destination.route_risk_level
+                    ),
+                )
+            )
+            continue
+
         allocated_quantity = min(
             requested_quantity,
             remaining_supply,
@@ -175,9 +328,9 @@ def allocate_supply(
             2,
         )
 
-        feasible = remaining_need == 0.0
+        fully_satisfied = remaining_need == 0.0
 
-        if feasible:
+        if fully_satisfied:
             explanation = (
                 f"Allocated {allocated_quantity:.2f} "
                 f"to {destination.destination_code}."
@@ -199,8 +352,17 @@ def allocate_supply(
                 ),
                 allocated_quantity=allocated_quantity,
                 remaining_need=remaining_need,
-                feasible=feasible,
+                feasible=fully_satisfied,
                 explanation=explanation,
+                route_distance_km=(
+                    destination.distance_from_source_km
+                ),
+                estimated_travel_hours=(
+                    destination.estimated_travel_hours
+                ),
+                route_risk_level=(
+                    destination.route_risk_level
+                ),
             )
         )
 
@@ -212,34 +374,23 @@ def allocate_supply(
             2,
         )
 
-    # Restore the original destination order.
     result_by_id = {
         result.destination_id: result
         for result in results
     }
 
-    return [
+    ordered_results = [
         result_by_id[destination.destination_id]
         for destination in destinations
     ]
+
+    return ordered_results, route_constraints
 
 
 def select_vehicle(
     vehicles: list[VehicleOption],
     recommended_quantity: float,
 ) -> Optional[VehicleOption]:
-    """
-    Select the best vehicle capable of carrying the required quantity.
-
-    Priority:
-    1. Active vehicle
-    2. AVAILABLE status
-    3. Sufficient capacity
-    4. Shorter distance
-    5. Shorter travel time
-    6. Smaller sufficient capacity
-    """
-
     eligible_vehicles = []
 
     for vehicle in vehicles:
@@ -287,15 +438,82 @@ def select_vehicle(
     return eligible_vehicles[0][3]
 
 
+def select_route_compatible_vehicle(
+    vehicles: list[VehicleOption],
+    recommended_quantity: float,
+    destination: SupplyDestination,
+) -> Optional[VehicleOption]:
+    """
+    Select a vehicle that can carry the required quantity and is
+    compatible with the selected destination route.
+    """
+
+    eligible_vehicles = []
+
+    for vehicle in vehicles:
+        if not vehicle.is_active:
+            continue
+
+        if vehicle.status.upper() != "AVAILABLE":
+            continue
+
+        if vehicle.capacity < recommended_quantity:
+            continue
+
+        if (
+            destination.distance_from_source_km is not None
+            and vehicle.distance_km is not None
+            and vehicle.distance_km
+            > destination.distance_from_source_km
+        ):
+            continue
+
+        if (
+            destination.estimated_travel_hours is not None
+            and vehicle.estimated_travel_hours is not None
+            and vehicle.estimated_travel_hours
+            > destination.estimated_travel_hours
+        ):
+            continue
+
+        distance = (
+            vehicle.distance_km
+            if vehicle.distance_km is not None
+            else float("inf")
+        )
+
+        travel_time = (
+            vehicle.estimated_travel_hours
+            if vehicle.estimated_travel_hours is not None
+            else float("inf")
+        )
+
+        eligible_vehicles.append(
+            (
+                distance,
+                travel_time,
+                vehicle.capacity,
+                vehicle,
+            )
+        )
+
+    if not eligible_vehicles:
+        return None
+
+    eligible_vehicles.sort(
+        key=lambda entry: (
+            entry[0],
+            entry[1],
+            entry[2],
+        )
+    )
+
+    return eligible_vehicles[0][3]
+
+
 def build_optimization_plan(
     optimization_input: OptimizationInput,
 ) -> OptimizationResult:
-    """
-    Build a demand-aware optimization plan.
-
-    Stage 10.4 extends the previous single-destination planner
-    with multi-location supply allocation.
-    """
 
     (
         recommended_quantity,
@@ -349,18 +567,22 @@ def build_optimization_plan(
         ),
     ]
 
-    # ---------------------------------------------------------
-    # Stage 10.4: Multi-location allocation
-    # ---------------------------------------------------------
-
+    route_constraints: list[RouteConstraint] = []
     allocations: list[AllocationResult] = []
 
-    if optimization_input.destinations:
-        available_supply = optimization_input.current_stock
+    # ---------------------------------------------------------
+    # Multi-location allocation
+    # ---------------------------------------------------------
 
-        allocations = allocate_supply(
-            available_supply=available_supply,
+    if optimization_input.destinations:
+
+        (
+            allocations,
+            route_constraints,
+        ) = allocate_supply(
+            available_supply=optimization_input.current_stock,
             destinations=optimization_input.destinations,
+            optimization_input=optimization_input,
         )
 
         total_requested = round(
@@ -384,10 +606,18 @@ def build_optimization_plan(
             for allocation in allocations
         )
 
+        route_feasible = all(
+            constraint.passed
+            for constraint in route_constraints
+        )
+
         constraints.append(
             OptimizationConstraint(
                 code="MULTI_LOCATION_ALLOCATION",
-                passed=all_destinations_satisfied,
+                passed=(
+                    all_destinations_satisfied
+                    and route_feasible
+                ),
                 message=(
                     f"Allocated {total_allocated:.2f} "
                     f"of {total_requested:.2f} "
@@ -396,6 +626,19 @@ def build_optimization_plan(
                 ),
             )
         )
+
+        if not route_feasible:
+            constraints.append(
+                OptimizationConstraint(
+                    code="ROUTE_FEASIBILITY",
+                    passed=False,
+                    message=(
+                        "One or more destination routes "
+                        "do not satisfy the configured "
+                        "route constraints."
+                    ),
+                )
+            )
 
         if total_allocated <= 0:
             return OptimizationResult(
@@ -410,16 +653,56 @@ def build_optimization_plan(
                 safety_buffer_quantity=safety_buffer_quantity,
                 target_stock=target_stock,
                 allocations=allocations,
+                route_constraints=route_constraints,
                 constraints=constraints,
                 explanation=(
-                    "No supply could be allocated to the "
-                    "requested destinations."
+                    "No feasible supply allocation "
+                    "is available for the requested "
+                    "destinations."
                 ),
             )
 
-        selected_vehicle = select_vehicle(
+        # Select vehicle against the first feasible allocated
+        # destination. This preserves deterministic behavior
+        # until multi-vehicle routing is introduced.
+        selected_destination = next(
+            (
+                destination
+                for destination in optimization_input.destinations
+                if any(
+                    allocation.destination_id
+                    == destination.destination_id
+                    and allocation.allocated_quantity > 0
+                    for allocation in allocations
+                )
+            ),
+            None,
+        )
+
+        if selected_destination is None:
+            return OptimizationResult(
+                feasible=False,
+                recommended_quantity=total_allocated,
+                selected_vehicle_id=None,
+                selected_vehicle_code=None,
+                planning_horizon_days=(
+                    optimization_input.planning_horizon_days
+                ),
+                expected_consumption=expected_consumption,
+                safety_buffer_quantity=safety_buffer_quantity,
+                target_stock=target_stock,
+                allocations=allocations,
+                route_constraints=route_constraints,
+                constraints=constraints,
+                explanation=(
+                    "No destination received an allocation."
+                ),
+            )
+
+        selected_vehicle = select_route_compatible_vehicle(
             optimization_input.vehicles,
             total_allocated,
+            selected_destination,
         )
 
         if selected_vehicle is None:
@@ -428,8 +711,9 @@ def build_optimization_plan(
                     code="VEHICLE_ALLOCATION",
                     passed=False,
                     message=(
-                        "No available vehicle has sufficient "
-                        "capacity for the allocated supply."
+                        "No available vehicle is compatible "
+                        "with the selected route and has "
+                        "sufficient capacity."
                     ),
                 )
             )
@@ -446,12 +730,13 @@ def build_optimization_plan(
                 safety_buffer_quantity=safety_buffer_quantity,
                 target_stock=target_stock,
                 allocations=allocations,
+                route_constraints=route_constraints,
                 constraints=constraints,
                 explanation=(
                     f"{total_allocated:.2f} "
                     f"{optimization_input.unit} "
-                    "can be allocated, but no suitable "
-                    "vehicle is available."
+                    "can be allocated, but no "
+                    "route-compatible vehicle is available."
                 ),
             )
 
@@ -479,37 +764,23 @@ def build_optimization_plan(
                         "capacity."
                     ),
                 ),
+                OptimizationConstraint(
+                    code="VEHICLE_ROUTE_COMPATIBILITY",
+                    passed=True,
+                    message=(
+                        f"Vehicle "
+                        f"{selected_vehicle.vehicle_code} "
+                        "is compatible with the selected route."
+                    ),
+                ),
             ]
         )
 
-        if selected_vehicle.distance_km is not None:
-            constraints.append(
-                OptimizationConstraint(
-                    code="ROUTE_DISTANCE",
-                    passed=True,
-                    message=(
-                        f"Selected vehicle route distance "
-                        f"is "
-                        f"{selected_vehicle.distance_km:.3f} km."
-                    ),
-                )
-            )
-
-        if selected_vehicle.estimated_travel_hours is not None:
-            constraints.append(
-                OptimizationConstraint(
-                    code="TRAVEL_TIME",
-                    passed=True,
-                    message=(
-                        f"Estimated travel time is "
-                        f"{selected_vehicle.estimated_travel_hours:.2f} "
-                        "hours."
-                    ),
-                )
-            )
-
         return OptimizationResult(
-            feasible=all_destinations_satisfied,
+            feasible=(
+                all_destinations_satisfied
+                and route_feasible
+            ),
             recommended_quantity=total_allocated,
             selected_vehicle_id=selected_vehicle.vehicle_id,
             selected_vehicle_code=selected_vehicle.vehicle_code,
@@ -532,6 +803,7 @@ def build_optimization_plan(
                 selected_vehicle.estimated_travel_hours
             ),
             allocations=allocations,
+            route_constraints=route_constraints,
             constraints=constraints,
             explanation=(
                 f"Allocate {total_allocated:.2f} "
@@ -569,6 +841,7 @@ def build_optimization_plan(
             safety_buffer_quantity=safety_buffer_quantity,
             target_stock=target_stock,
             allocations=[],
+            route_constraints=[],
             constraints=constraints,
             explanation=(
                 "No immediate resupply is required."
@@ -605,6 +878,7 @@ def build_optimization_plan(
             safety_buffer_quantity=safety_buffer_quantity,
             target_stock=target_stock,
             allocations=[],
+            route_constraints=[],
             constraints=constraints,
             explanation=(
                 f"Recommend resupplying "
@@ -689,6 +963,7 @@ def build_optimization_plan(
             selected_vehicle.estimated_travel_hours
         ),
         allocations=[],
+        route_constraints=[],
         constraints=constraints,
         explanation=(
             f"Recommend resupplying "

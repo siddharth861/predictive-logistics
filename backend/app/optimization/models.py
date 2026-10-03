@@ -32,6 +32,20 @@ class SupplyDestination:
     planning_horizon_days: int = 7
     safety_buffer_days: float = 2.0
 
+    # Stage 10.5 route data
+    distance_from_source_km: Optional[float] = None
+    estimated_travel_hours: Optional[float] = None
+    route_risk_level: str = "LOW"
+    route_available: bool = True
+
+
+@dataclass
+class RouteConstraint:
+    code: str
+    passed: bool
+    message: str
+    severity: str = "INFO"
+
 
 @dataclass
 class AllocationResult:
@@ -45,6 +59,11 @@ class AllocationResult:
 
     feasible: bool
     explanation: str = ""
+
+    # Stage 10.5 route details
+    route_distance_km: Optional[float] = None
+    estimated_travel_hours: Optional[float] = None
+    route_risk_level: str = "LOW"
 
 
 @dataclass
@@ -67,10 +86,19 @@ class OptimizationInput:
     planning_horizon_days: int = 7
     safety_buffer_days: float = 2.0
 
-    vehicles: list[VehicleOption] = field(default_factory=list)
+    vehicles: list[VehicleOption] = field(
+        default_factory=list
+    )
 
     # Stage 10.4 multi-location allocation
     destinations: list[SupplyDestination] = field(
+        default_factory=list
+    )
+
+    # Stage 10.5 route constraints
+    max_route_distance_km: Optional[float] = None
+    max_travel_hours: Optional[float] = None
+    blocked_route_risk_levels: list[str] = field(
         default_factory=list
     )
 
@@ -103,6 +131,11 @@ class OptimizationResult:
 
     # Stage 10.4 multi-location allocation
     allocations: list[AllocationResult] = field(
+        default_factory=list
+    )
+
+    # Stage 10.5 route constraints
+    route_constraints: list[RouteConstraint] = field(
         default_factory=list
     )
 
