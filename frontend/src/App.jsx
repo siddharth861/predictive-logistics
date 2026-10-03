@@ -1,10 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { getBackendHealth } from "./services/api";
+import "./App.css";
 
-const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8001";
+const API_URL = "http://localhost:8001";
 
-const NAV_ITEMS = [
-  { id: "overview", label: "Command Centre", icon: "⌂" },
+const navigation = [
+  { id: "command", label: "Command Centre", icon: "⌂" },
   { id: "operations", label: "Operations", icon: "◈" },
   { id: "map", label: "Operational Map", icon: "◎" },
   { id: "ai", label: "AI Intelligence", icon: "✦" },
@@ -12,504 +13,557 @@ const NAV_ITEMS = [
   { id: "data", label: "Data Hub", icon: "▦" },
 ];
 
+async function fetchJson(endpoint) {
+  const response = await fetch(`${API_URL}${endpoint}`);
+
+  if (!response.ok) {
+    throw new Error(`Request failed: ${response.status}`);
+  }
+
+  return response.json();
+}
+
 function App() {
-  const [activeView, setActiveView] = useState("overview");
-  const [backendStatus, setBackendStatus] = useState("Checking");
+  const [activePage, setActivePage] = useState("command");
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
+  const [systemStatus, setSystemStatus] = useState("Checking");
+  const [inventory, setInventory] = useState([]);
+  const [vehicles, setVehicles] = useState([]);
+  const [shipments, setShipments] = useState([]);
+
+  const [loadingKpis, setLoadingKpis] = useState(true);
+  const [dataError, setDataError] = useState("");
+
   useEffect(() => {
-    checkBackend();
+    let mounted = true;
+
+    async function loadDashboardData() {
+      setLoadingKpis(true);
+      setDataError("");
+
+      try {
+        const [health, inventoryResponse, vehicleResponse, shipmentResponse] =
+          await Promise.all([
+            getBackendHealth(),
+            fetchJson("/api/logistics/inventory"),
+            fetchJson("/api/logistics/vehicles"),
+            fetchJson("/api/logistics/shipments"),
+          ]);
+
+        if (!mounted) {
+          return;
+        }
+
+        if (health?.status === "healthy" || health?.status === "ok") {
+          setSystemStatus("Operational");
+        } else {
+          setSystemStatus("Degraded");
+        }
+
+        setInventory(inventoryResponse?.inventory ?? []);
+        setVehicles(vehicleResponse?.vehicles ?? []);
+        setShipments(shipmentResponse?.shipments ?? []);
+      } catch (error) {
+        if (!mounted) {
+          return;
+        }
+
+        setSystemStatus("Offline");
+        setDataError(error.message || "Unable to load dashboard data.");
+      } finally {
+        if (mounted) {
+          setLoadingKpis(false);
+        }
+      }
+    }
+
+    loadDashboardData();
+
+    return () => {
+      mounted = false;
+    };
   }, []);
 
-  async function checkBackend() {
-    try {
-      const data = await getBackendHealth();
+  const dashboardMetrics = useMemo(() => {
+    const totalInventory = inventory.reduce(
+      (sum, record) => sum + Number(record.quantity || 0),
+      0,
+    );
 
-      if (data.status === "healthy" || data.status === "ok") {
-        setBackendStatus("Operational");
-      } else {
-        setBackendStatus("Unexpected");
+    const totalMaximumStock = inventory.reduce(
+      (sum, record) => sum + Number(record.maximum_stock || 0),
+      0,
+    );
+
+    const inventoryUtilization =
+      totalMaximumStock > 0
+        ? (totalInventory / totalMaximumStock) * 100
+        : 0;
+
+    const availableVehicles = vehicles.filter(
+      (vehicle) =>
+        String(vehicle.status || "").toUpperCase() === "AVAILABLE" &&
+        vehicle.is_active !== false,
+    ).length;
+
+    const activeVehicles = vehicles.filter(
+      (vehicle) => vehicle.is_active !== false,
+    ).length;
+
+    const activeShipments = shipments.filter((shipment) =>
+      ["PLANNED", "DISPATCHED", "IN_TRANSIT"].includes(
+        String(shipment.status || "").toUpperCase(),
+      ),
+    ).length;
+
+    const deliveredShipments = shipments.filter(
+      (shipment) =>
+        String(shipment.status || "").toUpperCase() === "DELIVERED",
+    ).length;
+
+    const delayedShipments = shipments.filter((shipment) => {
+      const status = String(shipment.status || "").toUpperCase();
+
+      if (status === "DELIVERED") {
+        if (!shipment.estimated_arrival || !shipment.actual_arrival) {
+          return false;
+        }
+
+        return (
+          new Date(shipment.actual_arrival).getTime() >
+          new Date(shipment.estimated_arrival).getTime()
+        );
       }
-    } catch {
-      setBackendStatus("Offline");
-    }
-  }
 
-  function handleNavigation(view) {
-    setActiveView(view);
-    setSidebarOpen(false);
-  }
+      return false;
+    }).length;
 
-  const activeItem =
-    NAV_ITEMS.find((item) => item.id === activeView) || NAV_ITEMS[0];
+    return {
+      totalInventory,
+      inventoryUtilization,
+      totalVehicles: vehicles.length,
+      availableVehicles,
+      activeVehicles,
+      activeShipments,
+      deliveredShipments,
+      delayedShipments,
+      totalShipments: shipments.length,
+    };
+  }, [inventory, vehicles, shipments]);
+
+  const formatNumber = (value, decimals = 0) =>
+    Number(value || 0).toLocaleString("en-IN", {
+      minimumFractionDigits: decimals,
+      maximumFractionDigits: decimals,
+    });
+
+  const kpis = [
+    {
+      label: "Inventory",
+      value: loadingKpis
+        ? "..."
+        : `${formatNumber(dashboardMetrics.totalInventory, 1)} L`,
+      detail: loadingKpis
+        ? "Loading..."
+        : `${formatNumber(dashboardMetrics.inventoryUtilization, 0)}% capacity`,
+      tone: "olive",
+    },
+    {
+      label: "Active Shipments",
+      value: loadingKpis
+        ? "..."
+        : formatNumber(dashboardMetrics.activeShipments),
+      detail: loadingKpis
+        ? "Loading..."
+        : `${formatNumber(dashboardMetrics.totalShipments)} total`,
+      tone: "amber",
+    },
+    {
+      label: "Available Vehicles",
+      value: loadingKpis
+        ? "..."
+        : `${formatNumber(dashboardMetrics.availableVehicles)}/${formatNumber(
+            dashboardMetrics.totalVehicles,
+          )}`,
+      detail: loadingKpis
+        ? "Loading..."
+        : `${formatNumber(
+            dashboardMetrics.activeVehicles,
+          )} active fleet assets`,
+      tone: "blue",
+    },
+    {
+      label: "Delivered",
+      value: loadingKpis
+        ? "..."
+        : formatNumber(dashboardMetrics.deliveredShipments),
+      detail: loadingKpis
+        ? "Loading..."
+        : `${formatNumber(
+            dashboardMetrics.delayedShipments,
+          )} delayed on arrival`,
+      tone: "green",
+    },
+  ];
+
+  const pageContent = {
+    operations: {
+      title: "Operations",
+      subtitle: "Operational logistics monitoring and workflow control.",
+    },
+    map: {
+      title: "Operational Map",
+      subtitle: "GIS-based logistics picture and movement context.",
+    },
+    ai: {
+      title: "AI Intelligence",
+      subtitle: "Forecasts, risk signals, anomalies and explainable insights.",
+    },
+    optimization: {
+      title: "Optimization",
+      subtitle: "Resource allocation and route-aware planning.",
+    },
+    data: {
+      title: "Data Hub",
+      subtitle: "Connected sources, ingestion health and canonical data.",
+    },
+  };
+
+  function renderPlaceholderPage(page) {
+    const content = pageContent[page];
+
+    return (
+      <section className="module-page">
+        <div className="module-page-icon">{navigation.find((item) => item.id === page)?.icon}</div>
+        <h2>{content.title}</h2>
+        <p>{content.subtitle}</p>
+        <div className="module-page-note">
+          This module will be connected to the completed backend services in the
+          next frontend stages.
+        </div>
+      </section>
+    );
+  }
 
   return (
-    <div className="command-shell">
+    <div className="app-shell">
       {sidebarOpen && (
         <button
-          className="mobile-overlay"
-          onClick={() => setSidebarOpen(false)}
+          className="sidebar-backdrop"
+          type="button"
           aria-label="Close navigation"
+          onClick={() => setSidebarOpen(false)}
         />
       )}
 
       <aside className={`sidebar ${sidebarOpen ? "sidebar-open" : ""}`}>
-        <div className="brand">
-          <div className="brand-mark">
-            <span className="brand-mark-inner">PL</span>
-          </div>
-
+        <div className="brand-block">
+          <div className="brand-mark">PL</div>
           <div>
-            <div className="brand-name">PREDICTIVE</div>
-            <div className="brand-subtitle">LOGISTICS COMMAND</div>
+            <div className="brand-title">PREDICTIVE</div>
+            <div className="brand-subtitle">LOGISTICS PLATFORM</div>
           </div>
         </div>
 
-        <div className="sidebar-divider" />
+        <div className="sidebar-section-label">COMMAND</div>
 
-        <div className="nav-label">COMMAND MODULES</div>
-
-        <nav className="navigation">
-          {NAV_ITEMS.map((item) => (
+        <nav className="main-navigation">
+          {navigation.map((item) => (
             <button
               key={item.id}
+              type="button"
               className={`nav-item ${
-                activeView === item.id ? "active" : ""
+                activePage === item.id ? "nav-item-active" : ""
               }`}
-              onClick={() => handleNavigation(item.id)}
+              onClick={() => {
+                setActivePage(item.id);
+                setSidebarOpen(false);
+              }}
             >
               <span className="nav-icon">{item.icon}</span>
               <span>{item.label}</span>
-
-              {activeView === item.id && <span className="active-indicator" />}
             </button>
           ))}
         </nav>
 
-        <div className="sidebar-spacer" />
+        <div className="sidebar-bottom">
+          <div className="system-status-card">
+            <div className="status-heading">
+              <span
+                className={`status-dot ${
+                  systemStatus === "Operational"
+                    ? "status-online"
+                    : systemStatus === "Checking"
+                      ? "status-checking"
+                      : "status-offline"
+                }`}
+              />
+              <span>System Status</span>
+            </div>
 
-        <div className="system-card">
-          <div className="system-card-header">
-            <span className="system-pulse" />
-            SYSTEM STATUS
+            <strong>{systemStatus}</strong>
+
+            <span className="status-description">
+              {systemStatus === "Operational"
+                ? "All connected services responding"
+                : systemStatus === "Checking"
+                  ? "Checking backend services"
+                  : "Backend connection unavailable"}
+            </span>
           </div>
 
-          <strong>{backendStatus}</strong>
-
-          <p>
-            Core logistics services are being monitored through the command
-            centre.
-          </p>
-        </div>
-
-        <div className="sidebar-footer">
-          <span>PLATFORM</span>
-          <strong>v0.1 • SIH 2026</strong>
+          <div className="sidebar-footer">
+            <span>SIH 2026</span>
+            <span>•</span>
+            <span>DEMO ENVIRONMENT</span>
+          </div>
         </div>
       </aside>
 
-      <main className="main-area">
-        <header className="command-header">
-          <div className="header-left">
-            <button
-              className="mobile-menu"
-              onClick={() => setSidebarOpen(true)}
-              aria-label="Open navigation"
-            >
-              ☰
-            </button>
+      <main className="main-content">
+        <header className="topbar">
+          <button
+            className="mobile-menu-button"
+            type="button"
+            aria-label="Open navigation"
+            onClick={() => setSidebarOpen(true)}
+          >
+            ☰
+          </button>
 
-            <div>
-              <div className="breadcrumb">
-                COMMAND CENTRE <span>/</span> {activeItem.label.toUpperCase()}
-              </div>
-
-              <h1>{activeItem.label}</h1>
-            </div>
+          <div className="topbar-heading">
+            <span className="eyebrow">OPERATIONS / LIVE PICTURE</span>
+            <h1>
+              {activePage === "command"
+                ? "Command Centre"
+                : pageContent[activePage]?.title}
+            </h1>
           </div>
 
-          <div className="header-right">
-            <div className="header-clock">
-              <span className="clock-dot" />
-              LIVE OPERATIONAL VIEW
+          <div className="topbar-actions">
+            <div className="environment-pill">
+              <span className="environment-dot" />
+              SYNTHETIC DATA
             </div>
 
-            <div className="header-user">
-              <div className="user-avatar">LO</div>
-              <div className="user-info">
-                <strong>Logistics Officer</strong>
-                <span>Command Access</span>
-              </div>
-            </div>
+            <div className="user-badge">LO</div>
           </div>
         </header>
 
-        {activeView === "overview" && (
-          <CommandOverview backendStatus={backendStatus} />
-        )}
+        {activePage === "command" ? (
+          <div className="dashboard-content">
+            <section className="welcome-strip">
+              <div>
+                <span className="section-kicker">OPERATIONAL OVERVIEW</span>
+                <h2>Logistics Command Picture</h2>
+                <p>
+                  Monitor supply readiness, fleet availability and movement
+                  activity from the unified logistics data layer.
+                </p>
+              </div>
 
-        {activeView !== "overview" && (
-          <ModulePlaceholder
-            title={activeItem.label}
-            description={getModuleDescription(activeView)}
-            icon={activeItem.icon}
-          />
+              <div className="refresh-indicator">
+                <span className="pulse-dot" />
+                LIVE DATA
+              </div>
+            </section>
+
+            {dataError && (
+              <div className="data-warning">
+                <strong>Dashboard data warning</strong>
+                <span>{dataError}</span>
+              </div>
+            )}
+
+            <section className="kpi-grid">
+              {kpis.map((kpi) => (
+                <article className={`kpi-card kpi-${kpi.tone}`} key={kpi.label}>
+                  <div className="kpi-topline">
+                    <span>{kpi.label}</span>
+                    <span className="kpi-indicator" />
+                  </div>
+
+                  <strong>{kpi.value}</strong>
+                  <span>{kpi.detail}</span>
+                </article>
+              ))}
+            </section>
+
+            <section className="dashboard-grid">
+              <article className="panel map-panel">
+                <div className="panel-header">
+                  <div>
+                    <span className="panel-kicker">GEOSPATIAL</span>
+                    <h3>Operational Map</h3>
+                  </div>
+
+                  <button type="button" className="panel-action">
+                    OPEN MAP
+                  </button>
+                </div>
+
+                <div className="map-placeholder">
+                  <div className="map-grid-lines" />
+
+                  <div className="map-route map-route-one" />
+                  <div className="map-route map-route-two" />
+
+                  <div className="map-node map-node-depot">
+                    <span />
+                    <label>DEPOT-A</label>
+                  </div>
+
+                  <div className="map-node map-node-forward">
+                    <span />
+                    <label>FORWARD-B</label>
+                  </div>
+
+                  <div className="map-coordinate coordinate-one">
+                    19.0760° N / 72.8777° E
+                  </div>
+
+                  <div className="map-coordinate coordinate-two">
+                    19.2183° N / 72.9781° E
+                  </div>
+
+                  <div className="map-overlay-label">
+                    <span>ROUTE STATUS</span>
+                    <strong>NOMINAL</strong>
+                  </div>
+                </div>
+              </article>
+
+              <article className="panel brief-panel">
+                <div className="panel-header">
+                  <div>
+                    <span className="panel-kicker">DECISION INTELLIGENCE</span>
+                    <h3>AI Logistics Brief</h3>
+                  </div>
+
+                  <span className="confidence-badge">90.9% CONF.</span>
+                </div>
+
+                <div className="brief-main">
+                  <div className="brief-icon">✦</div>
+
+                  <div>
+                    <span className="brief-label">FORECAST SIGNAL</span>
+                    <h4>Fuel demand remains within expected range.</h4>
+                    <p>
+                      Current inventory remains above the configured minimum
+                      stock threshold for the active demonstration dataset.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="brief-metrics">
+                  <div>
+                    <span>Forecast</span>
+                    <strong>39.4 L</strong>
+                  </div>
+                  <div>
+                    <span>Stock Cover</span>
+                    <strong>12.7 days</strong>
+                  </div>
+                  <div>
+                    <span>Risk</span>
+                    <strong className="text-low">LOW</strong>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  className="full-width-button"
+                  onClick={() => setActivePage("ai")}
+                >
+                  VIEW AI INTELLIGENCE
+                </button>
+              </article>
+            </section>
+
+            <section className="bottom-grid">
+              <article className="panel alerts-panel">
+                <div className="panel-header">
+                  <div>
+                    <span className="panel-kicker">ATTENTION</span>
+                    <h3>Operational Alerts</h3>
+                  </div>
+
+                  <span className="alert-count">0 ACTIVE</span>
+                </div>
+
+                <div className="empty-alerts">
+                  <div className="empty-alert-icon">✓</div>
+                  <div>
+                    <strong>No active critical alerts</strong>
+                    <span>
+                      The current synthetic operational dataset has no unresolved
+                      critical logistics alerts.
+                    </span>
+                  </div>
+                </div>
+              </article>
+
+              <article className="panel supply-panel">
+                <div className="panel-header">
+                  <div>
+                    <span className="panel-kicker">MOVEMENT</span>
+                    <h3>Supply Flow</h3>
+                  </div>
+
+                  <button
+                    type="button"
+                    className="panel-action"
+                    onClick={() => setActivePage("operations")}
+                  >
+                    DETAILS
+                  </button>
+                </div>
+
+                <div className="flow-row">
+                  <div className="flow-location">
+                    <span className="flow-node flow-node-source" />
+                    <div>
+                      <strong>DEPOT-A</strong>
+                      <span>Source</span>
+                    </div>
+                  </div>
+
+                  <div className="flow-line">
+                    <span />
+                  </div>
+
+                  <div className="flow-vehicle">TRK-001</div>
+
+                  <div className="flow-line">
+                    <span />
+                  </div>
+
+                  <div className="flow-location">
+                    <span className="flow-node flow-node-destination" />
+                    <div>
+                      <strong>FORWARD-B</strong>
+                      <span>Destination</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flow-footer">
+                  <span>Last movement</span>
+                  <strong>100 L FUEL • DELIVERED</strong>
+                </div>
+              </article>
+            </section>
+          </div>
+        ) : (
+          <div className="dashboard-content">
+            {renderPlaceholderPage(activePage)}
+          </div>
         )}
       </main>
     </div>
   );
-}
-
-function CommandOverview({ backendStatus }) {
-  return (
-    <div className="dashboard">
-      <section className="hero-strip">
-        <div>
-          <div className="eyebrow">
-            LOGISTICS OPERATIONS • SYNTHETIC DEMONSTRATION DATA
-          </div>
-
-          <h2>Operational Picture</h2>
-
-          <p>
-            A unified view of supply readiness, movement, demand and
-            decision-support intelligence.
-          </p>
-        </div>
-
-        <div className="hero-status">
-          <div className="hero-status-label">SYSTEM</div>
-          <strong>{backendStatus}</strong>
-          <span>All command services</span>
-        </div>
-      </section>
-
-      <section className="kpi-grid">
-        <KpiCard
-          label="SUPPLY READINESS"
-          value="92%"
-          detail="Across monitored locations"
-          status="stable"
-        />
-
-        <KpiCard
-          label="ACTIVE SHIPMENTS"
-          value="31"
-          detail="Currently tracked"
-          status="stable"
-        />
-
-        <KpiCard
-          label="LOW STOCK EVENTS"
-          value="01"
-          detail="Requires attention"
-          status="warning"
-        />
-
-        <KpiCard
-          label="AI FORECAST"
-          value="39.4"
-          unit="L"
-          detail="Next-day fuel demand"
-          status="ai"
-        />
-      </section>
-
-      <section className="workspace-grid">
-        <div className="panel map-panel">
-          <PanelHeader
-            eyebrow="01 • SITUATIONAL AWARENESS"
-            title="Operational Map"
-            action="OPEN MAP"
-          />
-
-          <div className="map-placeholder">
-            <div className="map-grid" />
-
-            <div className="map-coordinate top-left">19°04'33"N</div>
-            <div className="map-coordinate top-right">72°52'39"E</div>
-
-            <div className="map-route route-one" />
-            <div className="map-route route-two" />
-
-            <MapNode
-              className="node-depot"
-              label="DEPOT-A"
-              type="DEPOT"
-            />
-
-            <MapNode
-              className="node-forward"
-              label="FORWARD-B"
-              type="FORWARD"
-            />
-
-            <div className="map-center-label">
-              <span>OPERATIONAL AREA</span>
-              <strong>LIVE LOGISTICS NETWORK</strong>
-            </div>
-
-            <div className="map-legend">
-              <div>
-                <span className="legend-dot depot" />
-                Depot
-              </div>
-
-              <div>
-                <span className="legend-dot forward" />
-                Forward Location
-              </div>
-
-              <div>
-                <span className="legend-line" />
-                Supply Route
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div className="right-stack">
-          <div className="panel intelligence-panel">
-            <PanelHeader
-              eyebrow="02 • DECISION INTELLIGENCE"
-              title="AI Logistics Brief"
-              action="VIEW"
-            />
-
-            <div className="ai-summary">
-              <div className="ai-symbol">✦</div>
-
-              <div>
-                <strong>Fuel demand is expected to remain stable.</strong>
-
-                <p>
-                  Forecast indicates approximately 39.4 L/day for the next
-                  planning period.
-                </p>
-              </div>
-            </div>
-
-            <div className="ai-metrics">
-              <div>
-                <span>CONFIDENCE</span>
-                <strong>90.95%</strong>
-              </div>
-
-              <div>
-                <span>RISK</span>
-                <strong className="low-risk">LOW</strong>
-              </div>
-
-              <div>
-                <span>COVER</span>
-                <strong>12.7d</strong>
-              </div>
-            </div>
-          </div>
-
-          <div className="panel alerts-panel">
-            <PanelHeader
-              eyebrow="03 • ATTENTION"
-              title="Operational Alerts"
-              action="ALL"
-            />
-
-            <AlertRow
-              severity="warning"
-              title="Low stock threshold"
-              description="DEPOT-A • Fuel inventory requires monitoring"
-              time="ACTIVE"
-            />
-
-            <AlertRow
-              severity="info"
-              title="Route monitoring"
-              description="31 shipment records available for analysis"
-              time="LIVE"
-            />
-
-            <AlertRow
-              severity="success"
-              title="System healthy"
-              description="Core backend services responding normally"
-              time="NOW"
-            />
-          </div>
-        </div>
-      </section>
-
-      <section className="bottom-grid">
-        <div className="panel supply-panel">
-          <PanelHeader
-            eyebrow="04 • SUPPLY NETWORK"
-            title="Supply Flow"
-            action="EXPLORE"
-          />
-
-          <div className="supply-flow">
-            <div className="flow-location">
-              <span className="flow-node depot-node" />
-
-              <div>
-                <strong>DEPOT-A</strong>
-                <span>Primary Supply Node</span>
-              </div>
-            </div>
-
-            <div className="flow-connector">
-              <span>18.97 km</span>
-
-              <div className="connector-line">
-                <i />
-                <i />
-                <i />
-              </div>
-            </div>
-
-            <div className="flow-location">
-              <span className="flow-node forward-node" />
-
-              <div>
-                <strong>FORWARD-B</strong>
-                <span>Destination Node</span>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div className="panel optimization-panel">
-          <PanelHeader
-            eyebrow="05 • PLANNING"
-            title="Optimization"
-            action="OPEN"
-          />
-
-          <div className="optimization-result">
-            <div>
-              <span>RECOMMENDED RESUPPLY</span>
-
-              <strong>
-                54.6 <small>L</small>
-              </strong>
-            </div>
-
-            <div className="optimization-status">
-              <span className="status-check">✓</span>
-
-              <div>
-                <strong>FEASIBLE</strong>
-                <span>Vehicle and route constraints satisfied</span>
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <footer className="dashboard-footer">
-        <span>Predictive Logistics Command Centre</span>
-        <span>Prototype • Synthetic / Non-sensitive Data</span>
-      </footer>
-    </div>
-  );
-}
-
-function KpiCard({ label, value, unit, detail, status }) {
-  return (
-    <div className={`kpi-card ${status}`}>
-      <div className="kpi-top">
-        <span>{label}</span>
-        <i />
-      </div>
-
-      <div className="kpi-value">
-        {value}
-        {unit && <small>{unit}</small>}
-      </div>
-
-      <div className="kpi-detail">{detail}</div>
-    </div>
-  );
-}
-
-function PanelHeader({ eyebrow, title, action }) {
-  return (
-    <div className="panel-header">
-      <div>
-        <span>{eyebrow}</span>
-        <h3>{title}</h3>
-      </div>
-
-      <button>{action} ↗</button>
-    </div>
-  );
-}
-
-function MapNode({ className, label, type }) {
-  return (
-    <div className={`map-node ${className}`}>
-      <div className="map-node-marker">
-        <span />
-      </div>
-
-      <div className="map-node-label">
-        <strong>{label}</strong>
-        <span>{type}</span>
-      </div>
-    </div>
-  );
-}
-
-function AlertRow({ severity, title, description, time }) {
-  return (
-    <div className="alert-row">
-      <span className={`alert-marker ${severity}`} />
-
-      <div className="alert-content">
-        <strong>{title}</strong>
-        <span>{description}</span>
-      </div>
-
-      <small>{time}</small>
-    </div>
-  );
-}
-
-function ModulePlaceholder({ title, description, icon }) {
-  return (
-    <div className="module-page">
-      <div className="module-placeholder">
-        <div className="module-icon">{icon}</div>
-
-        <div className="eyebrow">COMMAND MODULE</div>
-
-        <h2>{title}</h2>
-
-        <p>{description}</p>
-
-        <div className="module-progress">
-          <span>MODULE FOUNDATION</span>
-          <strong>READY FOR INTEGRATION</strong>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function getModuleDescription(view) {
-  const descriptions = {
-    operations:
-      "Monitor inventory, shipments, vehicles and logistics events from one operational workspace.",
-    map:
-      "Explore locations, routes, movement and geographic logistics intelligence.",
-    ai:
-      "Review demand forecasts, risk signals, anomalies and explainable AI insights.",
-    optimization:
-      "Generate feasible supply plans and compare operational what-if scenarios.",
-    data:
-      "Manage connected sources, ingestion health, data quality, mappings and lineage.",
-  };
-
-  return descriptions[view] || "Command module ready for integration.";
 }
 
 export default App;
